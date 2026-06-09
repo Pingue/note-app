@@ -113,7 +113,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             syncing = false
             statusMessage = when {
                 result.error != null -> "Sync failed: ${result.error}"
-                else -> "Synced ↑${result.uploaded} ↓${result.downloaded}"
+                else -> "Synced ↑${result.uploaded} ↓${result.downloaded}" +
+                    if (result.deleted > 0) " ✕${result.deleted}" else ""
             }
             // A pulled notebook may have replaced the open one on disk; refresh list.
             notebooks = repo.list()

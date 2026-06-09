@@ -17,12 +17,14 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.URLEncoder
 
 /** Outcome of a sync pass, surfaced to the UI as a short status line. */
 data class SyncResult(
     val uploaded: Int = 0,
     val downloaded: Int = 0,
+    val deleted: Int = 0,
     val error: String? = null,
 )
 
@@ -60,42 +62,68 @@ class DriveSync(private val context: Context, private val repo: DocumentReposito
             val token = GoogleAuthUtil.getToken(context, androidAccount, "oauth2:$DRIVE_FILE_SCOPE")
             val rootId = ensureRootFolder(token)
             val remote = listRemoteDocs(rootId, token).associateBy { it.docId }
+            val locals = repo.list().associateBy { it.id }
+
+            // Baseline of what existed at the last successful sync, used to tell a
+            // genuine deletion (gone on one side, unchanged on the other) apart
+            // from a brand-new document (so deletes propagate instead of being
+            // resurrected from the opposite side).
+            val baseline = readBaseline()
 
             var uploaded = 0
             var downloaded = 0
+            var deleted = 0
+            val survivors = HashMap<String, Long>()
 
-            val locals = repo.list()
-            val localIds = locals.map { it.id }.toSet()
-
-            for (doc in locals) {
-                val match = remote[doc.id]
+            for (id in locals.keys + remote.keys) {
+                val local = locals[id]
+                val rem = remote[id]
+                val base = baseline[id]
                 when {
-                    match == null -> {
-                        val folderId = createFolder(rootId, doc.title, doc.id, doc.updatedAt, token)
-                        pushFiles(doc.id, folderId, token)
-                        uploaded++
+                    local != null && rem != null -> {
+                        when {
+                            local.updatedAt > rem.updatedAt -> {
+                                pushFiles(id, rem.folderId, token)
+                                updateFolderMeta(rem.folderId, local.title, local.updatedAt, token)
+                                uploaded++
+                            }
+                            rem.updatedAt > local.updatedAt -> {
+                                pullFiles(id, rem.folderId, token)
+                                downloaded++
+                            }
+                        }
+                        survivors[id] = maxOf(local.updatedAt, rem.updatedAt)
                     }
-                    doc.updatedAt > match.updatedAt -> {
-                        pushFiles(doc.id, match.folderId, token)
-                        updateFolderMeta(match.folderId, doc.title, doc.updatedAt, token)
-                        uploaded++
+
+                    local != null && rem == null -> {
+                        // Missing remotely. If it was synced before and hasn't been
+                        // touched locally since, it was deleted on the other device.
+                        if (base != null && local.updatedAt <= base) {
+                            repo.delete(id)
+                            deleted++
+                        } else {
+                            val folderId = createFolder(rootId, local.title, id, local.updatedAt, token)
+                            pushFiles(id, folderId, token)
+                            uploaded++
+                            survivors[id] = local.updatedAt
+                        }
                     }
-                    match.updatedAt > doc.updatedAt -> {
-                        pullFiles(doc.id, match.folderId, token)
-                        downloaded++
+
+                    local == null && rem != null -> {
+                        if (base != null && rem.updatedAt <= base) {
+                            deleteRemoteFolder(rem.folderId, token)
+                            deleted++
+                        } else {
+                            pullFiles(id, rem.folderId, token)
+                            downloaded++
+                            survivors[id] = rem.updatedAt
+                        }
                     }
                 }
             }
 
-            // Documents that only exist remotely get pulled down.
-            for ((id, file) in remote) {
-                if (id !in localIds) {
-                    pullFiles(id, file.folderId, token)
-                    downloaded++
-                }
-            }
-
-            SyncResult(uploaded = uploaded, downloaded = downloaded)
+            writeBaseline(survivors)
+            SyncResult(uploaded = uploaded, downloaded = downloaded, deleted = deleted)
         } catch (e: Exception) {
             SyncResult(error = e.message ?: e.javaClass.simpleName)
         }
@@ -240,6 +268,28 @@ class DriveSync(private val context: Context, private val repo: DocumentReposito
             if (!resp.isSuccessful) error("Drive request failed: ${resp.code}")
             return text
         }
+    }
+
+    private fun deleteRemoteFolder(folderId: String, token: String) {
+        delete("$DRIVE_API/files/$folderId", token)
+    }
+
+    // ---- Sync baseline (tombstone tracking) -------------------------------
+
+    private val stateFile: File by lazy { File(context.filesDir, "sync-state.json") }
+
+    private fun readBaseline(): Map<String, Long> {
+        if (!stateFile.exists()) return emptyMap()
+        return runCatching {
+            val obj = JSONObject(stateFile.readText())
+            buildMap { for (key in obj.keys()) put(key, obj.optLong(key)) }
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun writeBaseline(state: Map<String, Long>) {
+        val obj = JSONObject()
+        for ((id, updatedAt) in state) obj.put(id, updatedAt)
+        runCatching { stateFile.writeText(obj.toString()) }
     }
 
     private fun mimeFor(name: String): String = when {
