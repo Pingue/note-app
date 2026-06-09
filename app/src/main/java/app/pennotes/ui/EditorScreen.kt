@@ -315,6 +315,7 @@ private fun ToolPanel(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ToolChip(label: String, selected: Boolean, onClick: () -> Unit) {
     FilterChip(
