@@ -349,7 +349,7 @@ private fun ToolPanel(
             val (label, value, range) = when (settings.tool) {
                 ToolType.PEN -> Triple("Pen size", settings.penSize, 1f..30f)
                 ToolType.HIGHLIGHTER -> Triple("Highlighter size", settings.highlighterSize, 8f..60f)
-                ToolType.ERASER -> Triple("Eraser size", settings.eraserSize, 10f..120f)
+                ToolType.ERASER, ToolType.ERASE_INK -> Triple("Eraser size", settings.eraserSize, 10f..120f)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(110.dp))
@@ -361,7 +361,7 @@ private fun ToolPanel(
                             when (settings.tool) {
                                 ToolType.PEN -> settings.copy(penSize = it)
                                 ToolType.HIGHLIGHTER -> settings.copy(highlighterSize = it)
-                                ToolType.ERASER -> settings.copy(eraserSize = it)
+                                ToolType.ERASER, ToolType.ERASE_INK -> settings.copy(eraserSize = it)
                             }
                         )
                     },
