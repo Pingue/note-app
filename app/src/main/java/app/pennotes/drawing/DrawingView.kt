@@ -8,7 +8,10 @@ import android.graphics.Path
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.VelocityTracker
 import android.view.View
+import android.view.ViewConfiguration
+import android.widget.OverScroller
 import app.pennotes.model.Notebook
 import app.pennotes.model.Page
 import app.pennotes.model.PageOrientation
@@ -72,10 +75,19 @@ class DrawingView(context: Context) : View(context) {
     private val bottomReserve get() = 200f * density
     private val overscroll get() = 48f * density
 
-    // Single-finger pan state (used in pen mode).
-    private var fingerPanning = false
-    private var lastPanPointerX = 0f
-    private var lastPanPointerY = 0f
+    // Pan/scroll state. A pan gesture tracks the focal point (the single finger,
+    // or the centroid of two) and translates the canvas by its movement, with
+    // pinch-zoom layered on top and fling momentum on release.
+    private var panActive = false
+    private var lastFocusX = 0f
+    private var lastFocusY = 0f
+    private var velocityTracker: VelocityTracker? = null
+    private val scroller = OverScroller(context)
+    private val minFlingVelocity = ViewConfiguration.get(context).scaledMinimumFlingVelocity.toFloat()
+    private val maxFlingVelocity = ViewConfiguration.get(context).scaledMaximumFlingVelocity.toFloat()
+    // Once a finger gesture turns multi-touch it stays a pan until all fingers
+    // lift, so lifting one finger can't suddenly start drawing.
+    private var multiTouchGesture = false
 
     // Tap-to-edit state for Markdown pages.
     private var mdTapping = false
@@ -265,17 +277,31 @@ class DrawingView(context: Context) : View(context) {
         panY = margin
     }
 
-    private fun clampPan() {
-        if (width == 0) return
+    /** Integer pan bounds for [OverScroller] fling/clamp; mirrors [clampPan]. */
+    private class PanBounds(val minX: Int, val maxX: Int, val minY: Int, val maxY: Int)
+
+    private fun panBounds(): PanBounds {
         val cw = contentWidth * scale
         val ch = contentHeight * scale
-        panX = if (cw <= width) (width - cw) / 2f else panX.coerceIn(width - cw, 0f)
+        val (minX, maxX) = if (cw <= width) {
+            val c = ((width - cw) / 2f).toInt(); c to c
+        } else (width - cw).toInt() to 0
 
         // Vertical bounds keep a band of deadspace at both ends and reserve room
         // so the last/first page can scroll clear of the overlay toolbars.
         val maxPanY = margin + topReserve + overscroll
         val minPanY = height - ch - margin - bottomReserve - overscroll
-        panY = if (minPanY > maxPanY) (height - ch) / 2f else panY.coerceIn(minPanY, maxPanY)
+        val (minY, maxY) = if (minPanY > maxPanY) {
+            val c = ((height - ch) / 2f).toInt(); c to c
+        } else minPanY.toInt() to maxPanY.toInt()
+        return PanBounds(minX, maxX, minY, maxY)
+    }
+
+    private fun clampPan() {
+        if (width == 0) return
+        val b = panBounds()
+        panX = panX.coerceIn(b.minX.toFloat(), b.maxX.toFloat())
+        panY = panY.coerceIn(b.minY.toFloat(), b.maxY.toFloat())
     }
 
     private fun toContentX(sx: Float) = (sx - panX) / scale
@@ -289,24 +315,15 @@ class DrawingView(context: Context) : View(context) {
 
     private val scaleDetector = ScaleGestureDetector(context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            private var prevFocusX = 0f
-            private var prevFocusY = 0f
-
-            override fun onScaleBegin(d: ScaleGestureDetector): Boolean {
-                prevFocusX = d.focusX
-                prevFocusY = d.focusY
-                return true
-            }
-
             override fun onScale(d: ScaleGestureDetector): Boolean {
                 val newScale = (scale * d.scaleFactor).coerceIn(minScale, maxScale)
+                // Zoom about the focal point, keeping the content under it fixed.
+                // Focal-point translation (two-finger scroll) is applied separately.
                 val fx = d.focusX
                 val fy = d.focusY
-                panX = fx - (fx - panX) * (newScale / scale) + (fx - prevFocusX)
-                panY = fy - (fy - panY) * (newScale / scale) + (fy - prevFocusY)
+                panX = fx - (fx - panX) * (newScale / scale)
+                panY = fy - (fy - panY) * (newScale / scale)
                 scale = newScale
-                prevFocusX = fx
-                prevFocusY = fy
                 clampPan()
                 invalidate()
                 return true
@@ -344,40 +361,41 @@ class DrawingView(context: Context) : View(context) {
             // (a resting palm) are simply ignored rather than cancelling the
             // stroke or panning the canvas.
             if (stylusIndex >= 0) {
-                fingerPanning = false
+                if (panActive) endPan()
                 handleDraw(event, stylusIndex)
                 return true
             }
-            // Finger-only input: scroll/zoom, unless the palm guard says this
-            // gesture is a resting hand. The decision is made at DOWN and held
-            // for the whole gesture.
+            // Finger-only input scrolls/zooms (one finger or two), unless the
+            // palm guard says this gesture is a resting hand. The decision is
+            // made at DOWN and held for the whole gesture.
             if (event.actionMasked == MotionEvent.ACTION_DOWN) {
                 fingerGestureRejected = palmGuardActive(event)
             }
             if (fingerGestureRejected) {
-                fingerPanning = false
                 if (event.actionMasked == MotionEvent.ACTION_UP ||
                     event.actionMasked == MotionEvent.ACTION_CANCEL
                 ) fingerGestureRejected = false
                 return true
             }
             scaleDetector.onTouchEvent(event)
-            if (event.pointerCount >= 2) {
-                fingerPanning = false
-                return true
-            }
-            handleFingerPan(event)
+            handlePan(event)
             return true
         }
 
-        // Finger mode: pinch scrolls/zooms, a single pointer draws.
-        scaleDetector.onTouchEvent(event)
-        if (event.pointerCount >= 2) {
+        // Finger mode: a single finger draws; two fingers scroll/zoom. Once a
+        // gesture goes multi-touch it stays a pan until every finger lifts.
+        if (event.pointerCount >= 2 || multiTouchGesture) {
             if (currentStroke != null) {
                 currentStroke = null
+                activePage = null
                 invalidate()
             }
-            fingerPanning = false
+            multiTouchGesture = true
+            scaleDetector.onTouchEvent(event)
+            handlePan(event)
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL
+            ) multiTouchGesture = false
             return true
         }
         handleDraw(event, 0)
@@ -403,6 +421,7 @@ class DrawingView(context: Context) : View(context) {
 
         when {
             isDownFor(event, pi) -> {
+                scroller.forceFinished(true)
                 redoStack.clear()
                 val pl = placedAt(cy) ?: return
                 activePage = pl
@@ -497,22 +516,113 @@ class DrawingView(context: Context) : View(context) {
         s.points.add(p)
     }
 
-    private fun handleFingerPan(event: MotionEvent) {
+    private fun handlePan(event: MotionEvent) {
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                fingerPanning = true
-                lastPanPointerX = event.x
-                lastPanPointerY = event.y
+            MotionEvent.ACTION_DOWN -> startPan(event)
+
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (!panActive) startPan(event)
+                else {
+                    velocityTracker?.addMovement(event)
+                    // Re-centre on the new pointer set so the canvas doesn't jump.
+                    lastFocusX = focusX(event)
+                    lastFocusY = focusY(event)
+                }
             }
-            MotionEvent.ACTION_MOVE -> if (fingerPanning) {
-                panX += event.x - lastPanPointerX
-                panY += event.y - lastPanPointerY
-                lastPanPointerX = event.x
-                lastPanPointerY = event.y
+
+            MotionEvent.ACTION_MOVE -> {
+                if (!panActive) startPan(event)
+                velocityTracker?.addMovement(event)
+                val fx = focusX(event)
+                val fy = focusY(event)
+                panX += fx - lastFocusX
+                panY += fy - lastFocusY
+                lastFocusX = fx
+                lastFocusY = fy
                 clampPan()
                 invalidate()
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> fingerPanning = false
+
+            MotionEvent.ACTION_POINTER_UP -> {
+                velocityTracker?.addMovement(event)
+                // focusX/Y exclude the lifting pointer, so this re-centres cleanly.
+                lastFocusX = focusX(event)
+                lastFocusY = focusY(event)
+            }
+
+            MotionEvent.ACTION_UP -> {
+                velocityTracker?.addMovement(event)
+                val vt = velocityTracker
+                var vx = 0f
+                var vy = 0f
+                if (vt != null) {
+                    vt.computeCurrentVelocity(1000, maxFlingVelocity)
+                    vx = vt.xVelocity
+                    vy = vt.yVelocity
+                }
+                endPan()
+                if (hypot(vx, vy) > minFlingVelocity) fling(vx, vy)
+            }
+
+            MotionEvent.ACTION_CANCEL -> endPan()
+        }
+    }
+
+    private fun startPan(event: MotionEvent) {
+        scroller.forceFinished(true)
+        panActive = true
+        lastFocusX = focusX(event)
+        lastFocusY = focusY(event)
+        velocityTracker?.recycle()
+        velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
+    }
+
+    private fun endPan() {
+        panActive = false
+        velocityTracker?.recycle()
+        velocityTracker = null
+    }
+
+    /** Average pointer X, excluding a pointer that is lifting on this event. */
+    private fun focusX(event: MotionEvent): Float {
+        val skip = if (event.actionMasked == MotionEvent.ACTION_POINTER_UP) event.actionIndex else -1
+        var sum = 0f
+        var n = 0
+        for (i in 0 until event.pointerCount) {
+            if (i == skip) continue
+            sum += event.getX(i); n++
+        }
+        return if (n > 0) sum / n else event.getX(0)
+    }
+
+    private fun focusY(event: MotionEvent): Float {
+        val skip = if (event.actionMasked == MotionEvent.ACTION_POINTER_UP) event.actionIndex else -1
+        var sum = 0f
+        var n = 0
+        for (i in 0 until event.pointerCount) {
+            if (i == skip) continue
+            sum += event.getY(i); n++
+        }
+        return if (n > 0) sum / n else event.getY(0)
+    }
+
+    private fun fling(vx: Float, vy: Float) {
+        val b = panBounds()
+        scroller.forceFinished(true)
+        scroller.fling(
+            panX.toInt(), panY.toInt(),
+            vx.toInt(), vy.toInt(),
+            b.minX, b.maxX, b.minY, b.maxY,
+        )
+        postInvalidateOnAnimation()
+    }
+
+    override fun computeScroll() {
+        if (scroller.computeScrollOffset()) {
+            panX = scroller.currX.toFloat()
+            panY = scroller.currY.toFloat()
+            clampPan()
+            postInvalidateOnAnimation()
         }
     }
 
