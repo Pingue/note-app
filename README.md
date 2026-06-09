@@ -9,8 +9,10 @@ published to the Play Store.
 
 ## Features
 
-- **Pen and finger input** — one pointer draws; two fingers pan and zoom.
+- **Pen and finger input** — one pointer draws; two fingers scroll and zoom.
   Stylus pressure modulates pen stroke width.
+- **Continuous vertical scrolling** through all pages of a notebook, on a
+  full-screen canvas with a floating overlay toolbar.
 - **Three tools**
   - **Pen** — adjustable colour and size, pressure-sensitive.
   - **Highlighter** — adjustable colour and size, semi-transparent so text
@@ -110,6 +112,16 @@ signing certificate.
 
 No API keys or secrets are stored in the repo — Android OAuth clients are
 identified by package name + signing certificate, not a secret.
+
+### Troubleshooting sign-in
+
+If the account picker appears, flickers, and closes without signing in, the
+app will show **"Drive sign-in failed (error 10)"**. Error 10 is
+`DEVELOPER_ERROR`: the certificate the installed APK is signed with has no
+matching Android OAuth client in your Google Cloud project. Register the SHA-1
+of the exact keystore you installed from (see step 3 above) and add your
+account as a test user on the consent screen. Other codes: `12501` =
+cancelled, `7` = network error.
 
 ## Notes & limitations
 

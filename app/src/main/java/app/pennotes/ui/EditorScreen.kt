@@ -9,24 +9,23 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ChevronLeft
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -34,13 +33,11 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -54,6 +51,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import app.pennotes.drawing.DrawingView
@@ -68,7 +66,6 @@ private val PRESET_COLORS = listOf(
     Color(0xFFFBC02D), Color(0xFF388E3C), Color(0xFF1976D2), Color(0xFF7B1FA2),
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditorScreen(vm: AppViewModel) {
     val notebook = vm.current ?: return
@@ -78,9 +75,7 @@ fun EditorScreen(vm: AppViewModel) {
 
     var settings by remember { mutableStateOf(ToolSettings()) }
     var drawingView by remember { mutableStateOf<DrawingView?>(null) }
-    var overflow by remember { mutableStateOf(false) }
-    var addMenu by remember { mutableStateOf(false) }
-    var exportMenu by remember { mutableStateOf(false) }
+    var pageCount by remember(notebook.id) { mutableStateOf(notebook.pages.size) }
     var showRename by remember { mutableStateOf(false) }
 
     LaunchedEffect(vm.statusMessage) {
@@ -90,19 +85,13 @@ fun EditorScreen(vm: AppViewModel) {
         }
     }
 
-    val pageIndex = vm.currentPageIndex.coerceIn(0, notebook.pages.size - 1)
-    val page = notebook.pages[pageIndex]
-
     fun share(mime: String, produce: suspend () -> List<java.io.File>) {
         scope.launch {
             val files = produce()
             if (files.isEmpty()) return@launch
             val uris = ArrayList(files.map { Exporter.uriFor(context, it) })
             val intent = if (uris.size == 1) {
-                Intent(Intent.ACTION_SEND).apply {
-                    type = mime
-                    putExtra(Intent.EXTRA_STREAM, uris[0])
-                }
+                Intent(Intent.ACTION_SEND).apply { type = mime; putExtra(Intent.EXTRA_STREAM, uris[0]) }
             } else {
                 Intent(Intent.ACTION_SEND_MULTIPLE).apply {
                     type = mime
@@ -114,109 +103,57 @@ fun EditorScreen(vm: AppViewModel) {
         }
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
-        topBar = {
-            TopAppBar(
-                navigationIcon = {
-                    IconButton(onClick = { vm.close() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                title = {
-                    Text(
-                        notebook.title,
-                        modifier = Modifier.clickable { showRename = true },
-                    )
-                },
-                actions = {
-                    IconButton(onClick = { drawingView?.undo(); vm.saveCurrent() }) {
-                        Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
-                    }
-                    IconButton(onClick = { drawingView?.redo(); vm.saveCurrent() }) {
-                        Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
-                    }
-                    IconButton(onClick = { addMenu = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = "Add page")
-                    }
-                    DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
-                        DropdownMenuItem(text = { Text("Add portrait page") }, onClick = {
-                            addMenu = false; vm.addPage(PageOrientation.PORTRAIT)
-                        })
-                        DropdownMenuItem(text = { Text("Add landscape page") }, onClick = {
-                            addMenu = false; vm.addPage(PageOrientation.LANDSCAPE)
-                        })
-                    }
-                    IconButton(onClick = { exportMenu = true }) {
-                        Icon(Icons.Filled.Share, contentDescription = "Export")
-                    }
-                    DropdownMenu(expanded = exportMenu, onDismissRequest = { exportMenu = false }) {
-                        DropdownMenuItem(text = { Text("Export PDF") }, onClick = {
-                            exportMenu = false
-                            share("application/pdf") { listOf(Exporter.exportPdf(context, notebook)) }
-                        })
-                        DropdownMenuItem(text = { Text("Export JPG (per page)") }, onClick = {
-                            exportMenu = false
-                            share("image/jpeg") { Exporter.exportJpgs(context, notebook) }
-                        })
-                    }
-                    IconButton(onClick = { vm.sync() }, enabled = !vm.syncing) {
-                        Icon(Icons.Filled.CloudSync, contentDescription = "Sync")
-                    }
-                    IconButton(onClick = { overflow = true }) {
-                        Icon(Icons.Filled.MoreVert, contentDescription = "More")
-                    }
-                    DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
-                        DropdownMenuItem(text = { Text("Rename notebook") }, onClick = {
-                            overflow = false; showRename = true
-                        })
-                        DropdownMenuItem(text = { Text("Make page portrait") }, onClick = {
-                            overflow = false
-                            vm.setCurrentPageOrientation(PageOrientation.PORTRAIT)
-                            drawingView?.resetView()
-                        })
-                        DropdownMenuItem(text = { Text("Make page landscape") }, onClick = {
-                            overflow = false
-                            vm.setCurrentPageOrientation(PageOrientation.LANDSCAPE)
-                            drawingView?.resetView()
-                        })
-                        DropdownMenuItem(text = { Text("Reset zoom") }, onClick = {
-                            overflow = false; drawingView?.resetView()
-                        })
-                        DropdownMenuItem(text = { Text("Delete this page") }, onClick = {
-                            overflow = false; vm.deleteCurrentPage()
-                        })
-                    }
-                },
-            )
-        },
-        bottomBar = {
-            ToolPanel(
-                settings = settings,
-                onSettingsChange = { settings = it },
-                pageIndex = pageIndex,
-                pageCount = notebook.pages.size,
-                onPrev = { vm.goToPage(pageIndex - 1) },
-                onNext = { vm.goToPage(pageIndex + 1) },
-            )
-        },
-    ) { padding ->
+    Box(Modifier.fillMaxSize()) {
+        // Full-screen drawing surface.
         AndroidView(
-            modifier = Modifier.fillMaxSize().padding(padding)
-                .background(MaterialTheme.colorScheme.surfaceVariant),
+            modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 DrawingView(ctx).also { view ->
                     view.onChanged = { vm.saveCurrent() }
+                    view.onStructureChanged = { pageCount = view.pageCount() }
                     drawingView = view
                 }
             },
             update = { view ->
-                if (view.tag != page.id) {
-                    view.setPage(page)
-                    view.tag = page.id
+                if (view.tag != notebook.id) {
+                    view.setNotebook(notebook)
+                    view.tag = notebook.id
+                    pageCount = notebook.pages.size
                 }
                 view.settings = settings
             },
+        )
+
+        // Floating top toolbar overlaid on the canvas.
+        EditorTopBar(
+            title = notebook.title,
+            pageCount = pageCount,
+            onBack = { vm.close() },
+            onTitleClick = { showRename = true },
+            onUndo = { drawingView?.undo() },
+            onRedo = { drawingView?.redo() },
+            onAddPage = { drawingView?.addPage(it) },
+            onExportPdf = { share("application/pdf") { listOf(Exporter.exportPdf(context, notebook)) } },
+            onExportJpg = { share("image/jpeg") { Exporter.exportJpgs(context, notebook) } },
+            onSync = { vm.sync() },
+            syncing = vm.syncing,
+            onMakePortrait = { drawingView?.setFocusedPageOrientation(PageOrientation.PORTRAIT) },
+            onMakeLandscape = { drawingView?.setFocusedPageOrientation(PageOrientation.LANDSCAPE) },
+            onDeletePage = { drawingView?.deleteFocusedPage() },
+            onResetZoom = { drawingView?.resetView() },
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
+
+        // Floating tool panel overlaid at the bottom.
+        ToolPanel(
+            settings = settings,
+            onSettingsChange = { settings = it },
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
+
+        SnackbarHost(
+            snackbar,
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 120.dp),
         )
     }
 
@@ -231,17 +168,96 @@ fun EditorScreen(vm: AppViewModel) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EditorTopBar(
+    title: String,
+    pageCount: Int,
+    onBack: () -> Unit,
+    onTitleClick: () -> Unit,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+    onAddPage: (PageOrientation) -> Unit,
+    onExportPdf: () -> Unit,
+    onExportJpg: () -> Unit,
+    onSync: () -> Unit,
+    syncing: Boolean,
+    onMakePortrait: () -> Unit,
+    onMakeLandscape: () -> Unit,
+    onDeletePage: () -> Unit,
+    onResetZoom: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var addMenu by remember { mutableStateOf(false) }
+    var overflow by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+        tonalElevation = 3.dp,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Column(Modifier.weight(1f).clickable { onTitleClick() }) {
+                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "$pageCount page${if (pageCount == 1) "" else "s"}",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            IconButton(onClick = onUndo) {
+                Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
+            }
+            IconButton(onClick = onRedo) {
+                Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
+            }
+            IconButton(onClick = { addMenu = true }) {
+                Icon(Icons.Filled.Add, contentDescription = "Add page")
+            }
+            DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                DropdownMenuItem(text = { Text("Add portrait page") }, onClick = {
+                    addMenu = false; onAddPage(PageOrientation.PORTRAIT)
+                })
+                DropdownMenuItem(text = { Text("Add landscape page") }, onClick = {
+                    addMenu = false; onAddPage(PageOrientation.LANDSCAPE)
+                })
+            }
+            IconButton(onClick = onSync, enabled = !syncing) {
+                Icon(Icons.Filled.CloudSync, contentDescription = "Sync")
+            }
+            IconButton(onClick = { overflow = true }) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More")
+            }
+            DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
+                DropdownMenuItem(text = { Text("Export PDF") }, onClick = { overflow = false; onExportPdf() })
+                DropdownMenuItem(text = { Text("Export JPG (per page)") }, onClick = { overflow = false; onExportJpg() })
+                DropdownMenuItem(text = { Text("Make page portrait") }, onClick = { overflow = false; onMakePortrait() })
+                DropdownMenuItem(text = { Text("Make page landscape") }, onClick = { overflow = false; onMakeLandscape() })
+                DropdownMenuItem(text = { Text("Delete current page") }, onClick = { overflow = false; onDeletePage() })
+                DropdownMenuItem(text = { Text("Reset zoom") }, onClick = { overflow = false; onResetZoom() })
+            }
+        }
+    }
+}
+
 @Composable
 private fun ToolPanel(
     settings: ToolSettings,
     onSettingsChange: (ToolSettings) -> Unit,
-    pageIndex: Int,
-    pageCount: Int,
-    onPrev: () -> Unit,
-    onNext: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Surface(tonalElevation = 3.dp) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+    Surface(
+        modifier = modifier.padding(12.dp),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+        tonalElevation = 4.dp,
+    ) {
+        Column(Modifier.navigationBarsPadding().padding(horizontal = 14.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ToolChip("Pen", settings.tool == ToolType.PEN) {
                     onSettingsChange(settings.copy(tool = ToolType.PEN))
@@ -251,14 +267,6 @@ private fun ToolPanel(
                 }
                 ToolChip("Eraser", settings.tool == ToolType.ERASER) {
                     onSettingsChange(settings.copy(tool = ToolType.ERASER))
-                }
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = onPrev, enabled = pageIndex > 0) {
-                    Icon(Icons.Filled.ChevronLeft, contentDescription = "Previous page")
-                }
-                Text("${pageIndex + 1} / $pageCount", style = MaterialTheme.typography.labelLarge)
-                IconButton(onClick = onNext, enabled = pageIndex < pageCount - 1) {
-                    Icon(Icons.Filled.ChevronRight, contentDescription = "Next page")
                 }
             }
 

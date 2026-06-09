@@ -33,10 +33,8 @@ class MainActivity : ComponentActivity() {
 private fun AppRoot(vm: AppViewModel = viewModel()) {
     val signInLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) {
-        // Whatever the result, re-read the cached account and sync if signed in.
-        vm.refreshAccount()
-        if (vm.signedInEmail != null) vm.sync()
+    ) { result ->
+        vm.handleSignInResult(result.data)
     }
 
     val launchSignIn = { signInLauncher.launch(vm.driveSync.signInClient().signInIntent) }

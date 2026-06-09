@@ -1,6 +1,7 @@
 package app.pennotes.ui
 
 import android.app.Application
+import android.content.Intent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.neverEqualPolicy
@@ -8,11 +9,11 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.pennotes.model.Notebook
-import app.pennotes.model.Page
-import app.pennotes.model.PageOrientation
 import app.pennotes.storage.NotebookRepository
 import app.pennotes.storage.NotebookSummary
 import app.pennotes.sync.DriveSync
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.common.api.ApiException
 import kotlinx.coroutines.launch
 
 /** Drives the whole app: the notebook list, the open notebook, and Drive sync. */
@@ -24,8 +25,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var notebooks by mutableStateOf<List<NotebookSummary>>(emptyList())
         private set
     var current by mutableStateOf<Notebook?>(null, neverEqualPolicy())
-        private set
-    var currentPageIndex by mutableStateOf(0)
         private set
 
     var signedInEmail by mutableStateOf<String?>(null)
@@ -51,12 +50,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val nb = repo.create(title.ifBlank { "Untitled" })
         notebooks = repo.list()
         current = nb
-        currentPageIndex = 0
     }
 
     fun open(id: String) = viewModelScope.launch {
         current = repo.load(id)
-        currentPageIndex = 0
     }
 
     fun close() = viewModelScope.launch {
@@ -80,36 +77,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         saveCurrent()
     }
 
-    fun goToPage(index: Int) {
-        val nb = current ?: return
-        currentPageIndex = index.coerceIn(0, nb.pages.size - 1)
-    }
-
-    fun addPage(orientation: PageOrientation) {
-        val nb = current ?: return
-        nb.pages.add(Page(orientation = orientation))
-        currentPageIndex = nb.pages.size - 1
-        current = current
-        saveCurrent()
-    }
-
-    fun deleteCurrentPage() {
-        val nb = current ?: return
-        if (nb.pages.size <= 1) return
-        nb.pages.removeAt(currentPageIndex)
-        currentPageIndex = currentPageIndex.coerceIn(0, nb.pages.size - 1)
-        current = current
-        saveCurrent()
-    }
-
-    fun setCurrentPageOrientation(orientation: PageOrientation) {
-        val nb = current ?: return
-        nb.pages.getOrNull(currentPageIndex)?.orientation = orientation
-        saveCurrent()
-    }
-
     fun signOut() {
         driveSync.signInClient().signOut().addOnCompleteListener { refreshAccount() }
+    }
+
+    /** Parse the Google Sign-In result and surface a precise error if it failed. */
+    fun handleSignInResult(data: Intent?) {
+        try {
+            val account = GoogleSignIn.getSignedInAccountFromIntent(data)
+                .getResult(ApiException::class.java)
+            signedInEmail = account.email
+            statusMessage = "Signed in as ${account.email}"
+            sync()
+        } catch (e: ApiException) {
+            refreshAccount()
+            statusMessage = signInErrorMessage(e.statusCode)
+        }
+    }
+
+    private fun signInErrorMessage(code: Int): String = when (code) {
+        // CommonStatusCodes.DEVELOPER_ERROR
+        10 -> "Drive sign-in failed (error 10): this APK's signing certificate " +
+            "is not registered in a Google Cloud OAuth client. See the README."
+        12501 -> "Sign-in cancelled."
+        7 -> "Sign-in failed: network error."
+        else -> "Drive sign-in failed (error $code)."
     }
 
     fun sync() {
