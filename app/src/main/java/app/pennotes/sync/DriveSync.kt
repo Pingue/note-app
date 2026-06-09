@@ -130,7 +130,8 @@ class DriveSync(private val context: Context, private val repo: NotebookReposito
         for (i in 0 until arr.length()) {
             val f = arr.getJSONObject(i)
             val props = f.optJSONObject("appProperties") ?: continue
-            val nbId = props.optString("notebookId").ifEmpty { continue }
+            val nbId = props.optString("notebookId")
+            if (nbId.isEmpty()) continue
             val updated = props.optString("updatedAt").toLongOrNull() ?: 0L
             out.add(RemoteFile(f.getString("id"), nbId, updated))
         }
