@@ -17,6 +17,21 @@ android {
         versionName = "1.0"
     }
 
+    // Release signing is driven by environment variables so the keystore stays
+    // out of the repo (provided by CI from GitHub Secrets). Without them the
+    // release build is simply left unsigned.
+    val keystorePath = System.getenv("KEYSTORE_FILE")
+    signingConfigs {
+        create("release") {
+            if (keystorePath != null) {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -24,6 +39,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (keystorePath != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

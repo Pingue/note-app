@@ -116,6 +116,40 @@ signing certificate.
 No API keys or secrets are stored in the repo — Android OAuth clients are
 identified by package name + signing certificate, not a secret.
 
+### Using Drive sync with the CI-built APK (fixed signing keystore)
+
+The debug APK from CI is signed with the runner's throwaway keystore, whose
+SHA-1 you can't register. To make Drive sync work from a CI build, sign a
+**release** APK with your own keystore stored in GitHub Secrets:
+
+1. Generate a keystore locally (keep it safe; don't commit it):
+   ```bash
+   keytool -genkeypair -v -keystore pennotes-release.jks \
+     -alias pennotes -keyalg RSA -keysize 2048 -validity 10000
+   ```
+   Choose a store password and key password (they may be the same).
+2. Read its SHA-1 (register this in the OAuth Android client, step 3 above):
+   ```bash
+   keytool -list -v -keystore pennotes-release.jks -alias pennotes
+   ```
+3. Base64-encode the keystore for the secret:
+   ```bash
+   base64 -w0 pennotes-release.jks      # Linux
+   base64 -i pennotes-release.jks       # macOS
+   ```
+4. In the repo: **Settings → Secrets and variables → Actions → New repository
+   secret**, add:
+   - `KEYSTORE_BASE64` — the base64 string from step 3
+   - `KEYSTORE_PASSWORD` — the store password
+   - `KEY_ALIAS` — `pennotes`
+   - `KEY_PASSWORD` — the key password
+5. Re-run the build. When the secret is present, CI also produces a
+   **`pennotes-release-apk`** artifact, signed with your keystore. Install that
+   one. (Uninstall any earlier debug build first — different signature.)
+
+The same keystore SHA-1 also works for a local `./gradlew installDebug` only if
+you point the debug build at it; simplest is to just use the release artifact.
+
 ### Troubleshooting sign-in
 
 If the account picker appears, flickers, and closes without signing in, the
