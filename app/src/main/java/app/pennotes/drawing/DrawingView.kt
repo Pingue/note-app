@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
@@ -81,6 +82,15 @@ class DrawingView(context: Context) : View(context) {
     private var mdDownX = 0f
     private var mdDownY = 0f
     private val tapSlop = 12f * resources.displayMetrics.density
+
+    // Palm rejection state (pen mode): finger input is dropped while the stylus
+    // is hovering over the screen or was used moments ago, and palm-sized
+    // contacts are dropped outright. A gesture rejected at its DOWN stays
+    // rejected until all pointers lift, so the guard can't kick in mid-pan.
+    private var stylusHovering = false
+    private var lastStylusMs = 0L
+    private var fingerGestureRejected = false
+    private val palmContactPx = PALM_CONTACT_MM / 25.4f * resources.displayMetrics.xdpi
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -303,10 +313,65 @@ class DrawingView(context: Context) : View(context) {
             }
         })
 
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        scaleDetector.onTouchEvent(event)
+    override fun onHoverEvent(event: MotionEvent): Boolean {
+        if (isStylusTool(event.getToolType(0))) {
+            stylusHovering = event.actionMasked != MotionEvent.ACTION_HOVER_EXIT
+            lastStylusMs = SystemClock.uptimeMillis()
+        }
+        return super.onHoverEvent(event)
+    }
 
-        // Two or more pointers: scroll/zoom only, never drawing.
+    private fun isStylusTool(toolType: Int) =
+        toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
+
+    private fun palmGuardActive(event: MotionEvent): Boolean {
+        if (stylusHovering) return true
+        if (SystemClock.uptimeMillis() - lastStylusMs < PALM_RECENT_MS) return true
+        // Devices that don't report hover: reject palm-sized contacts by area.
+        for (i in 0 until event.pointerCount) {
+            if (event.getTouchMajor(i) > palmContactPx) return true
+        }
+        return false
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val stylusIndex = (0 until event.pointerCount)
+            .firstOrNull { isStylusTool(event.getToolType(it)) } ?: -1
+        if (stylusIndex >= 0) lastStylusMs = SystemClock.uptimeMillis()
+
+        if (penMode) {
+            // Stylus present: it draws; any other pointers in the same event
+            // (a resting palm) are simply ignored rather than cancelling the
+            // stroke or panning the canvas.
+            if (stylusIndex >= 0) {
+                fingerPanning = false
+                handleDraw(event, stylusIndex)
+                return true
+            }
+            // Finger-only input: scroll/zoom, unless the palm guard says this
+            // gesture is a resting hand. The decision is made at DOWN and held
+            // for the whole gesture.
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                fingerGestureRejected = palmGuardActive(event)
+            }
+            if (fingerGestureRejected) {
+                fingerPanning = false
+                if (event.actionMasked == MotionEvent.ACTION_UP ||
+                    event.actionMasked == MotionEvent.ACTION_CANCEL
+                ) fingerGestureRejected = false
+                return true
+            }
+            scaleDetector.onTouchEvent(event)
+            if (event.pointerCount >= 2) {
+                fingerPanning = false
+                return true
+            }
+            handleFingerPan(event)
+            return true
+        }
+
+        // Finger mode: pinch scrolls/zooms, a single pointer draws.
+        scaleDetector.onTouchEvent(event)
         if (event.pointerCount >= 2) {
             if (currentStroke != null) {
                 currentStroke = null
@@ -315,59 +380,87 @@ class DrawingView(context: Context) : View(context) {
             fingerPanning = false
             return true
         }
+        handleDraw(event, 0)
+        return true
+    }
 
-        // In pen mode only a stylus draws; a single finger scrolls the canvas.
-        val toolType = event.getToolType(0)
-        val isStylus = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
-        if (penMode && !isStylus) {
-            handleFingerPan(event)
-            return true
-        }
+    /** Whether this event begins/ends the gesture for the given pointer. */
+    private fun isDownFor(event: MotionEvent, pi: Int) =
+        event.actionMasked == MotionEvent.ACTION_DOWN ||
+            (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN && event.actionIndex == pi)
 
-        val cx = toContentX(event.x)
-        val cy = toContentY(event.y)
-        val pressure = event.pressure.takeIf { it > 0f } ?: 1f
+    private fun isUpFor(event: MotionEvent, pi: Int) =
+        event.actionMasked == MotionEvent.ACTION_UP ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL ||
+            (event.actionMasked == MotionEvent.ACTION_POINTER_UP && event.actionIndex == pi)
+
+    private fun handleDraw(event: MotionEvent, pi: Int) {
+        val sx = event.getX(pi)
+        val sy = event.getY(pi)
+        val cx = toContentX(sx)
+        val cy = toContentY(sy)
         val objectErase = settings.tool == ToolType.ERASER && settings.eraserMode == EraserMode.OBJECT
 
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
+        when {
+            isDownFor(event, pi) -> {
                 redoStack.clear()
-                val pl = placedAt(cy) ?: return true
+                val pl = placedAt(cy) ?: return
                 activePage = pl
                 if (pl.page.type == PageType.MARKDOWN) {
                     // Markdown pages aren't drawn on; a tap opens the text editor.
                     mdTapping = true
-                    mdDownX = event.x
-                    mdDownY = event.y
+                    mdDownX = sx
+                    mdDownY = sy
                 } else if (objectErase) {
                     erasedThisGesture.clear()
                     eraseAt(pl, cx, cy)
                 } else {
                     currentStroke = newStroke().also {
-                        it.points.add(localPoint(pl, cx, cy, pressure))
+                        it.points.add(localPoint(pl, cx, cy, pressureAt(event, pi)))
                     }
                 }
                 invalidate()
             }
 
-            MotionEvent.ACTION_MOVE -> {
-                val pl = activePage ?: return true
+            event.actionMasked == MotionEvent.ACTION_MOVE -> {
+                val pl = activePage ?: return
                 if (pl.page.type == PageType.MARKDOWN) {
-                    if (mdTapping && (abs(event.x - mdDownX) > tapSlop || abs(event.y - mdDownY) > tapSlop)) {
+                    if (mdTapping && (abs(sx - mdDownX) > tapSlop || abs(sy - mdDownY) > tapSlop)) {
                         mdTapping = false
                     }
                 } else if (objectErase) {
+                    // Walk the batched samples too so fast swipes don't skip strokes.
+                    for (h in 0 until event.historySize) {
+                        eraseAt(
+                            pl,
+                            toContentX(event.getHistoricalX(pi, h)),
+                            toContentY(event.getHistoricalY(pi, h)),
+                        )
+                    }
                     eraseAt(pl, cx, cy)
                 } else {
-                    currentStroke?.points?.add(localPoint(pl, cx, cy, pressure))
+                    currentStroke?.let { s ->
+                        // The stylus samples faster than events arrive; the extra
+                        // samples ride along in the history and are what make
+                        // curves smooth instead of polygonal.
+                        for (h in 0 until event.historySize) {
+                            addStrokePoint(
+                                s, pl,
+                                toContentX(event.getHistoricalX(pi, h)),
+                                toContentY(event.getHistoricalY(pi, h)),
+                                event.getHistoricalPressure(pi, h),
+                            )
+                        }
+                        addStrokePoint(s, pl, cx, cy, pressureAt(event, pi))
+                    }
                     invalidate()
                 }
             }
 
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+            isUpFor(event, pi) -> {
                 val pl = activePage
                 if (pl != null && pl.page.type == PageType.MARKDOWN) {
-                    if (mdTapping && event.actionMasked == MotionEvent.ACTION_UP) {
+                    if (mdTapping && event.actionMasked != MotionEvent.ACTION_CANCEL) {
                         onMarkdownTap?.invoke(pl.page)
                     }
                     mdTapping = false
@@ -391,7 +484,17 @@ class DrawingView(context: Context) : View(context) {
                 invalidate()
             }
         }
-        return true
+    }
+
+    private fun pressureAt(event: MotionEvent, pi: Int) =
+        event.getPressure(pi).takeIf { it > 0f } ?: 1f
+
+    /** Appends a point, skipping samples too close to the last one to matter. */
+    private fun addStrokePoint(s: Stroke, pl: Placed, cx: Float, cy: Float, pressure: Float) {
+        val p = localPoint(pl, cx, cy, pressure)
+        val last = s.points.lastOrNull()
+        if (last != null && hypot(p.x - last.x, p.y - last.y) < MIN_POINT_DISTANCE) return
+        s.points.add(p)
     }
 
     private fun handleFingerPan(event: MotionEvent) {
@@ -486,5 +589,16 @@ class DrawingView(context: Context) : View(context) {
             )
         }
         canvas.restore()
+    }
+
+    companion object {
+        /** How long after the stylus last touched/hovered finger input stays rejected. */
+        private const val PALM_RECENT_MS = 700L
+
+        /** Contacts wider than this are treated as a palm even without hover support. */
+        private const val PALM_CONTACT_MM = 22f
+
+        /** Page-unit distance below which consecutive samples are merged (~0.17mm). */
+        private const val MIN_POINT_DISTANCE = 1f
     }
 }

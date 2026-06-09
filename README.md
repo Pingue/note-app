@@ -20,7 +20,9 @@ published to the Play Store.
   - **Eraser** — adjustable size, with two modes: **delete objects** (removes
     whole strokes it touches) or **rub out to white** (paints opaque white).
 - **Pen mode** toggle — when on, only a stylus draws and a single finger
-  scrolls; when off, touch draws and two fingers scroll/zoom.
+  scrolls; when off, touch draws and two fingers scroll/zoom. Pen mode has
+  **palm rejection**: finger input is ignored while the stylus is hovering or
+  was just used, and palm-sized contacts are dropped.
 - **Documents & pages** — create, open, rename and delete documents. Each
   document is a folder of pages described by an `index.pennotes` manifest;
   pages are independently **portrait or landscape**.

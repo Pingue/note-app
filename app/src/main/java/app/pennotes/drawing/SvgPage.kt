@@ -79,8 +79,19 @@ object SvgPage {
             sb.append("/>\n")
             return
         }
+        // Quadratic curves through segment midpoints, mirroring StrokeRenderer,
+        // so the standalone SVG is as smooth as the in-app rendering.
         val d = StringBuilder("M ${num(pts[0].x)} ${num(pts[0].y)}")
-        for (i in 1 until pts.size) d.append(" L ${num(pts[i].x)} ${num(pts[i].y)}")
+        if (pts.size == 2) {
+            d.append(" L ${num(pts[1].x)} ${num(pts[1].y)}")
+        } else {
+            for (i in 1 until pts.size - 1) {
+                val midX = (pts[i].x + pts[i + 1].x) / 2f
+                val midY = (pts[i].y + pts[i + 1].y) / 2f
+                d.append(" Q ${num(pts[i].x)} ${num(pts[i].y)} ${num(midX)} ${num(midY)}")
+            }
+            d.append(" L ${num(pts[pts.size - 1].x)} ${num(pts[pts.size - 1].y)}")
+        }
         sb.append("<path d=\"$d\" fill=\"none\" stroke=\"$color\" stroke-width=\"${num(width)}\" ")
         sb.append("stroke-linecap=\"round\" stroke-linejoin=\"round\"")
         if (opacity != null) sb.append(" stroke-opacity=\"$opacity\"")
