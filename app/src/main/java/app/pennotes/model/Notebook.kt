@@ -3,8 +3,8 @@ package app.pennotes.model
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
-/** The three drawing tools the editor exposes. */
-enum class ToolType { PEN, HIGHLIGHTER, ERASER }
+/** The drawing tools. ERASE_INK is the "rub out to white" eraser, stored as an opaque background-coloured stroke. */
+enum class ToolType { PEN, HIGHLIGHTER, ERASER, ERASE_INK }
 
 /** A page can be laid out tall or wide; this also drives PDF/JPG export size. */
 enum class PageOrientation { PORTRAIT, LANDSCAPE }

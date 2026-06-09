@@ -46,7 +46,19 @@ object StrokeRenderer {
                 }
             }
 
-            ToolType.ERASER -> { /* erasers mutate the stroke list, nothing to draw */ }
+            ToolType.ERASE_INK -> {
+                // "Rub out to white": an opaque, constant-width background-coloured stroke.
+                paint.color = stroke.color
+                paint.alpha = 255
+                paint.strokeWidth = stroke.width
+                path.reset()
+                path.moveTo(pts[0].x, pts[0].y)
+                for (i in 1 until pts.size) path.lineTo(pts[i].x, pts[i].y)
+                if (pts.size == 1) path.lineTo(pts[0].x + 0.1f, pts[0].y)
+                canvas.drawPath(path, paint)
+            }
+
+            ToolType.ERASER -> { /* object eraser mutates the stroke list, nothing to draw */ }
         }
     }
 }

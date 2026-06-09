@@ -17,15 +17,18 @@ published to the Play Store.
   - **Pen** — adjustable colour and size, pressure-sensitive.
   - **Highlighter** — adjustable colour and size, semi-transparent so text
     underneath stays readable.
-  - **Eraser** — adjustable size; removes whole strokes it touches.
+  - **Eraser** — adjustable size, with two modes: **delete objects** (removes
+    whole strokes it touches) or **rub out to white** (paints opaque white).
+- **Pen mode** toggle — when on, only a stylus draws and a single finger
+  scrolls; when off, touch draws and two fingers scroll/zoom.
 - **Files & pages** — create, open, rename and delete notebook files. Each
   notebook holds multiple pages, each independently **portrait or landscape**.
 - **Undo / redo** for strokes and erases.
 - **Google Drive sync** — two-way sync to a `PenNotes` folder in your Drive,
   backed by a local cache so the app works fully offline. Conflicts resolve
   last-write-wins by modification time.
-- **Export** — share a whole notebook as a **PDF**, or export each page as a
-  **JPG**.
+- **Export** — save a notebook **PDF** to a chosen location via the system file
+  picker, or share it; export each page as a **JPG**.
 - **Responsive** — a grid library on the home screen and a canvas that fits any
   screen, so it works on both phones and tablets.
 - **Light/dark theme**, with Material You dynamic colour on Android 12+.
@@ -125,7 +128,10 @@ cancelled, `7` = network error.
 
 ## Notes & limitations
 
-- The eraser removes whole strokes it intersects (vector erase), not pixels.
+- The object eraser removes whole strokes it intersects (vector erase). The
+  "rub out to white" eraser paints opaque white strokes on top rather than
+  splitting the underlying ink, which is simple and looks correct on white
+  pages.
 - Sync is last-write-wins per notebook; it is not designed for simultaneous
   editing of the same notebook on two devices.
 - Pages use an A4-proportioned coordinate space, so PDF/JPG exports come out at a

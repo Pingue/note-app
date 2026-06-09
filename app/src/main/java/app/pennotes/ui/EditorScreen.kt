@@ -1,6 +1,8 @@
 package app.pennotes.ui
 
 import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,7 +27,9 @@ import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -55,6 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import app.pennotes.drawing.DrawingView
+import app.pennotes.drawing.EraserMode
 import app.pennotes.drawing.ToolSettings
 import app.pennotes.export.Exporter
 import app.pennotes.model.PageOrientation
@@ -74,6 +79,7 @@ fun EditorScreen(vm: AppViewModel) {
     val snackbar = remember { SnackbarHostState() }
 
     var settings by remember { mutableStateOf(ToolSettings()) }
+    var penMode by remember { mutableStateOf(false) }
     var drawingView by remember { mutableStateOf<DrawingView?>(null) }
     var pageCount by remember(notebook.id) { mutableStateOf(notebook.pages.size) }
     var showRename by remember { mutableStateOf(false) }
@@ -82,6 +88,21 @@ fun EditorScreen(vm: AppViewModel) {
         vm.statusMessage?.let {
             scope.launch { snackbar.showSnackbar(it) }
             vm.statusMessage = null
+        }
+    }
+
+    // Save a PDF to a user-chosen location via the system file picker.
+    val savePdf = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf")
+    ) { uri ->
+        if (uri != null) scope.launch {
+            val pdf = Exporter.exportPdf(context, notebook)
+            val ok = runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    pdf.inputStream().use { it.copyTo(out) }
+                }
+            }.isSuccess
+            vm.statusMessage = if (ok) "PDF saved" else "Couldn't save PDF"
         }
     }
 
@@ -121,6 +142,7 @@ fun EditorScreen(vm: AppViewModel) {
                     pageCount = notebook.pages.size
                 }
                 view.settings = settings
+                view.penMode = penMode
             },
         )
 
@@ -128,12 +150,15 @@ fun EditorScreen(vm: AppViewModel) {
         EditorTopBar(
             title = notebook.title,
             pageCount = pageCount,
+            penMode = penMode,
+            onTogglePenMode = { penMode = !penMode },
             onBack = { vm.close() },
             onTitleClick = { showRename = true },
             onUndo = { drawingView?.undo() },
             onRedo = { drawingView?.redo() },
             onAddPage = { drawingView?.addPage(it) },
-            onExportPdf = { share("application/pdf") { listOf(Exporter.exportPdf(context, notebook)) } },
+            onSharePdf = { share("application/pdf") { listOf(Exporter.exportPdf(context, notebook)) } },
+            onSavePdf = { savePdf.launch("${notebook.title}.pdf") },
             onExportJpg = { share("image/jpeg") { Exporter.exportJpgs(context, notebook) } },
             onSync = { vm.sync() },
             syncing = vm.syncing,
@@ -173,12 +198,15 @@ fun EditorScreen(vm: AppViewModel) {
 private fun EditorTopBar(
     title: String,
     pageCount: Int,
+    penMode: Boolean,
+    onTogglePenMode: () -> Unit,
     onBack: () -> Unit,
     onTitleClick: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onAddPage: (PageOrientation) -> Unit,
-    onExportPdf: () -> Unit,
+    onSharePdf: () -> Unit,
+    onSavePdf: () -> Unit,
     onExportJpg: () -> Unit,
     onSync: () -> Unit,
     syncing: Boolean,
@@ -210,6 +238,13 @@ private fun EditorTopBar(
                     style = MaterialTheme.typography.labelSmall,
                 )
             }
+            IconButton(onClick = onTogglePenMode) {
+                Icon(
+                    if (penMode) Icons.Filled.Edit else Icons.Filled.TouchApp,
+                    contentDescription = if (penMode) "Pen mode: stylus draws, finger scrolls" else "Finger mode: touch draws",
+                    tint = if (penMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             IconButton(onClick = onUndo) {
                 Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
             }
@@ -234,8 +269,9 @@ private fun EditorTopBar(
                 Icon(Icons.Filled.MoreVert, contentDescription = "More")
             }
             DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
-                DropdownMenuItem(text = { Text("Export PDF") }, onClick = { overflow = false; onExportPdf() })
-                DropdownMenuItem(text = { Text("Export JPG (per page)") }, onClick = { overflow = false; onExportJpg() })
+                DropdownMenuItem(text = { Text("Save PDF to device") }, onClick = { overflow = false; onSavePdf() })
+                DropdownMenuItem(text = { Text("Share PDF") }, onClick = { overflow = false; onSharePdf() })
+                DropdownMenuItem(text = { Text("Share JPG (per page)") }, onClick = { overflow = false; onExportJpg() })
                 DropdownMenuItem(text = { Text("Make page portrait") }, onClick = { overflow = false; onMakePortrait() })
                 DropdownMenuItem(text = { Text("Make page landscape") }, onClick = { overflow = false; onMakeLandscape() })
                 DropdownMenuItem(text = { Text("Delete current page") }, onClick = { overflow = false; onDeletePage() })
@@ -293,6 +329,19 @@ private fun ToolPanel(
                                     )
                                 },
                         ) {}
+                    }
+                }
+            } else {
+                Row(
+                    Modifier.padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ToolChip("Delete objects", settings.eraserMode == EraserMode.OBJECT) {
+                        onSettingsChange(settings.copy(eraserMode = EraserMode.OBJECT))
+                    }
+                    ToolChip("Rub out to white", settings.eraserMode == EraserMode.INK) {
+                        onSettingsChange(settings.copy(eraserMode = EraserMode.INK))
                     }
                 }
             }

@@ -16,6 +16,9 @@ import app.pennotes.model.ToolType
 import kotlin.math.abs
 import kotlin.math.hypot
 
+/** Object eraser deletes whole strokes; ink eraser paints opaque white over them. */
+enum class EraserMode { OBJECT, INK }
+
 /** Mutable holder for the currently selected tool and its per-tool attributes. */
 data class ToolSettings(
     var tool: ToolType = ToolType.PEN,
@@ -24,6 +27,7 @@ data class ToolSettings(
     var highlighterColor: Int = Color.YELLOW,
     var highlighterSize: Float = 28f,
     var eraserSize: Float = 40f,
+    var eraserMode: EraserMode = EraserMode.OBJECT,
 )
 
 /**
@@ -36,6 +40,9 @@ class DrawingView(context: Context) : View(context) {
 
     private var notebook: Notebook = Notebook()
     var settings: ToolSettings = ToolSettings()
+
+    /** When true, only a stylus draws; a single finger scrolls instead. */
+    var penMode: Boolean = false
 
     /** Invoked when stroke content changes, so the host can autosave. */
     var onChanged: (() -> Unit)? = null
@@ -51,6 +58,18 @@ class DrawingView(context: Context) : View(context) {
     private val maxScale = 8f
     private val gap = 40f
     private val margin = 24f
+
+    private val density = resources.displayMetrics.density
+    // Extra scroll room so pages can clear the floating overlay toolbars,
+    // plus a little deadspace above the first and below the last page.
+    private val topReserve get() = 64f * density
+    private val bottomReserve get() = 200f * density
+    private val overscroll get() = 48f * density
+
+    // Single-finger pan state (used in pen mode).
+    private var fingerPanning = false
+    private var lastPanPointerX = 0f
+    private var lastPanPointerY = 0f
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -220,7 +239,12 @@ class DrawingView(context: Context) : View(context) {
         val cw = contentWidth * scale
         val ch = contentHeight * scale
         panX = if (cw <= width) (width - cw) / 2f else panX.coerceIn(width - cw, 0f)
-        panY = if (ch <= height) (height - ch) / 2f else panY.coerceIn(height - ch - margin, margin)
+
+        // Vertical bounds keep a band of deadspace at both ends and reserve room
+        // so the last/first page can scroll clear of the overlay toolbars.
+        val maxPanY = margin + topReserve + overscroll
+        val minPanY = height - ch - margin - bottomReserve - overscroll
+        panY = if (minPanY > maxPanY) (height - ch) / 2f else panY.coerceIn(minPanY, maxPanY)
     }
 
     private fun toContentX(sx: Float) = (sx - panX) / scale
@@ -267,19 +291,29 @@ class DrawingView(context: Context) : View(context) {
                 currentStroke = null
                 invalidate()
             }
+            fingerPanning = false
+            return true
+        }
+
+        // In pen mode only a stylus draws; a single finger scrolls the canvas.
+        val toolType = event.getToolType(0)
+        val isStylus = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
+        if (penMode && !isStylus) {
+            handleFingerPan(event)
             return true
         }
 
         val cx = toContentX(event.x)
         val cy = toContentY(event.y)
         val pressure = event.pressure.takeIf { it > 0f } ?: 1f
+        val objectErase = settings.tool == ToolType.ERASER && settings.eraserMode == EraserMode.OBJECT
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 redoStack.clear()
                 val pl = placedAt(cy) ?: return true
                 activePage = pl
-                if (settings.tool == ToolType.ERASER) {
+                if (objectErase) {
                     erasedThisGesture.clear()
                     eraseAt(pl, cx, cy)
                 } else {
@@ -292,7 +326,7 @@ class DrawingView(context: Context) : View(context) {
 
             MotionEvent.ACTION_MOVE -> {
                 val pl = activePage ?: return true
-                if (settings.tool == ToolType.ERASER) {
+                if (objectErase) {
                     eraseAt(pl, cx, cy)
                 } else {
                     currentStroke?.points?.add(localPoint(pl, cx, cy, pressure))
@@ -302,7 +336,7 @@ class DrawingView(context: Context) : View(context) {
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 val pl = activePage
-                if (settings.tool == ToolType.ERASER) {
+                if (objectErase) {
                     if (pl != null && erasedThisGesture.isNotEmpty()) {
                         undoStack.addLast(EraseOp(pl.page, erasedThisGesture.toList()))
                         erasedThisGesture.clear()
@@ -325,6 +359,25 @@ class DrawingView(context: Context) : View(context) {
         return true
     }
 
+    private fun handleFingerPan(event: MotionEvent) {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                fingerPanning = true
+                lastPanPointerX = event.x
+                lastPanPointerY = event.y
+            }
+            MotionEvent.ACTION_MOVE -> if (fingerPanning) {
+                panX += event.x - lastPanPointerX
+                panY += event.y - lastPanPointerY
+                lastPanPointerX = event.x
+                lastPanPointerY = event.y
+                clampPan()
+                invalidate()
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> fingerPanning = false
+        }
+    }
+
     private fun localPoint(pl: Placed, cx: Float, cy: Float, pressure: Float) =
         StrokePoint(cx - pl.xOffset, cy - pl.topY, pressure)
 
@@ -332,7 +385,9 @@ class DrawingView(context: Context) : View(context) {
         ToolType.PEN -> Stroke(ToolType.PEN, settings.penColor, settings.penSize)
         ToolType.HIGHLIGHTER ->
             Stroke(ToolType.HIGHLIGHTER, settings.highlighterColor, settings.highlighterSize)
-        ToolType.ERASER -> Stroke(ToolType.ERASER, Color.TRANSPARENT, settings.eraserSize)
+        // The ink eraser is a white opaque stroke; object erase never reaches here.
+        ToolType.ERASER, ToolType.ERASE_INK ->
+            Stroke(ToolType.ERASE_INK, Color.WHITE, settings.eraserSize)
     }
 
     private fun eraseAt(pl: Placed, cx: Float, cy: Float) {
