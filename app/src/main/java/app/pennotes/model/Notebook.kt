@@ -10,6 +10,13 @@ enum class ToolType { PEN, HIGHLIGHTER, ERASER, ERASE_INK }
 enum class PageOrientation { PORTRAIT, LANDSCAPE }
 
 /**
+ * The underlying file kind a page renders from. SVG is the graphical
+ * (handwriting) page; MARKDOWN is reserved for future text pages so the
+ * document format can grow without a breaking change.
+ */
+enum class PageType { SVG, MARKDOWN }
+
+/**
  * A single sampled input point in *page* coordinate space (not screen space),
  * so strokes render and export identically regardless of zoom or device size.
  */
@@ -41,6 +48,7 @@ data class Page(
     val id: String = UUID.randomUUID().toString(),
     var orientation: PageOrientation = PageOrientation.PORTRAIT,
     val strokes: MutableList<Stroke> = mutableListOf(),
+    var type: PageType = PageType.SVG,
 ) {
     val width: Float get() = if (orientation == PageOrientation.PORTRAIT) A4_SHORT else A4_LONG
     val height: Float get() = if (orientation == PageOrientation.PORTRAIT) A4_LONG else A4_SHORT
@@ -51,11 +59,36 @@ data class Page(
     }
 }
 
-/** A notebook file: a titled, ordered collection of pages. */
-@Serializable
+/**
+ * In-memory representation of an open document: a titled, ordered set of pages.
+ * On disk this is a folder (one file per page) described by [DocumentManifest].
+ */
 data class Notebook(
     val id: String = UUID.randomUUID().toString(),
     var title: String = "Untitled",
     val pages: MutableList<Page> = mutableListOf(Page()),
     var updatedAt: Long = System.currentTimeMillis(),
+)
+
+/** One entry in the document manifest, pointing at a page's underlying file. */
+@Serializable
+data class PageRef(
+    val id: String = UUID.randomUUID().toString(),
+    val type: PageType = PageType.SVG,
+    val file: String,
+    val orientation: PageOrientation = PageOrientation.PORTRAIT,
+)
+
+/**
+ * The `.pennotes` manifest: a small JSON wrapper that lists a document's pages
+ * in render order, each pointing at an underlying file (SVG today, Markdown in
+ * future). The manifest plus those files live together in one folder.
+ */
+@Serializable
+data class DocumentManifest(
+    val id: String = UUID.randomUUID().toString(),
+    var title: String = "Untitled",
+    var updatedAt: Long = System.currentTimeMillis(),
+    val pages: MutableList<PageRef> = mutableListOf(),
+    val formatVersion: Int = 2,
 )

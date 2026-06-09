@@ -9,8 +9,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.pennotes.model.Notebook
-import app.pennotes.storage.NotebookRepository
-import app.pennotes.storage.NotebookSummary
+import app.pennotes.storage.DocumentRepository
+import app.pennotes.storage.DocumentSummary
 import app.pennotes.sync.DriveSync
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
@@ -19,10 +19,10 @@ import kotlinx.coroutines.launch
 /** Drives the whole app: the notebook list, the open notebook, and Drive sync. */
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
-    val repo = NotebookRepository(app)
+    val repo = DocumentRepository(app)
     val driveSync = DriveSync(app, repo)
 
-    var notebooks by mutableStateOf<List<NotebookSummary>>(emptyList())
+    var notebooks by mutableStateOf<List<DocumentSummary>>(emptyList())
         private set
     var current by mutableStateOf<Notebook?>(null, neverEqualPolicy())
         private set

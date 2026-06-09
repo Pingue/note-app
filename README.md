@@ -21,8 +21,10 @@ published to the Play Store.
     whole strokes it touches) or **rub out to white** (paints opaque white).
 - **Pen mode** toggle — when on, only a stylus draws and a single finger
   scrolls; when off, touch draws and two fingers scroll/zoom.
-- **Files & pages** — create, open, rename and delete notebook files. Each
-  notebook holds multiple pages, each independently **portrait or landscape**.
+- **Documents & pages** — create, open, rename and delete documents. Each
+  document is a folder of pages (one SVG per page) described by an
+  `index.pennotes` manifest; pages are independently **portrait or landscape**.
+  Page SVGs are openable in any SVG viewer and round-trip losslessly in-app.
 - **Undo / redo** for strokes and erases.
 - **Google Drive sync** — two-way sync to a `PenNotes` folder in your Drive,
   backed by a local cache so the app works fully offline. Conflicts resolve
@@ -38,23 +40,35 @@ published to the Play Store.
 - Kotlin, Jetpack Compose for the UI shell, with a custom `View`
   (`DrawingView`) for the drawing surface (reliable `MotionEvent`/stylus
   handling).
-- Notebooks are stored as JSON (kotlinx.serialization). The save format is
-  deliberately simple — see `model/Notebook.kt`. Files live in the app's private
-  storage (`filesDir/notebooks/*.pennote`), which doubles as the offline cache.
+- **Document format.** A document is a *folder*, not a single file:
+  ```
+  documents/<id>/
+    index.pennotes     # JSON manifest: ordered list of pages, each with a type
+    <pageId>.svg       # one self-describing SVG per page
+  ```
+  The `index.pennotes` manifest (kotlinx.serialization) lists pages in render
+  order; each entry has a `type` (`svg` today, `markdown` reserved for future
+  text pages). Each page SVG renders in any viewer **and** embeds the exact
+  stroke data (pressure, tool, colour) in `<metadata>`, so the app reloads it
+  losslessly. This folder is also the offline cache. See `model/Notebook.kt`,
+  `storage/DocumentRepository.kt`, and `drawing/SvgPage.kt`.
 - Drive access uses Google Sign-In with the `drive.file` scope and the Drive v3
-  REST API over OkHttp. The app can only see files it creates.
+  REST API over OkHttp. Each document is a sub-folder of a `PenNotes` Drive
+  folder; the app lists those sub-folders as documents. The app can only see
+  files it creates.
 - Export uses Android's `PdfDocument` and `Bitmap` APIs. On-screen and exported
   rendering share one code path (`drawing/StrokeRenderer.kt`).
 
 ```
 app/src/main/java/app/pennotes/
 ├── MainActivity.kt            # Compose host + sign-in launcher
-├── model/Notebook.kt          # Notebook / Page / Stroke data model
+├── model/Notebook.kt          # Notebook / Page / Stroke + manifest model
 ├── drawing/
-│   ├── DrawingView.kt         # custom canvas: input, pan/zoom, undo/redo
-│   └── StrokeRenderer.kt      # shared stroke painting (editor + export)
-├── storage/NotebookRepository.kt   # JSON load/save + offline cache
-├── sync/DriveSync.kt          # Google Drive two-way sync
+│   ├── DrawingView.kt         # custom canvas: input, scroll/zoom, undo/redo
+│   ├── StrokeRenderer.kt      # shared stroke painting (editor + export)
+│   └── SvgPage.kt             # page <-> self-describing SVG (round-trip)
+├── storage/DocumentRepository.kt   # folder + SVG store / offline cache
+├── sync/DriveSync.kt          # Google Drive folder-per-document sync
 ├── export/Exporter.kt         # PDF + JPG export
 └── ui/                        # Compose screens, view model, theme
 ```

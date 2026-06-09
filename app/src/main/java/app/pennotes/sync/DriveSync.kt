@@ -1,8 +1,7 @@
 package app.pennotes.sync
 
 import android.content.Context
-import app.pennotes.model.Notebook
-import app.pennotes.storage.NotebookRepository
+import app.pennotes.storage.DocumentRepository
 import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
@@ -16,6 +15,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -27,16 +27,16 @@ data class SyncResult(
 )
 
 /**
- * Two-way sync between the local notebook cache and a "PenNotes" folder in the
- * user's Google Drive. Strokes never leave the device unless the user signs in;
- * the app is fully usable offline. Conflicts resolve last-write-wins using the
- * notebook's own [Notebook.updatedAt], mirrored into Drive appProperties.
+ * Two-way sync between the local document store and a "PenNotes" folder in the
+ * user's Google Drive. Each document is a *sub-folder* (containing the
+ * `index.pennotes` manifest and one SVG per page), tagged with the document id
+ * and modification time in Drive appProperties. Conflicts resolve last-write-
+ * wins per document; the app is fully usable offline.
  *
- * Sign-in uses the classic Google Sign-In flow with the drive.file scope, which
- * only grants access to files this app creates. See the README for the Google
- * Cloud OAuth client setup required to enable sync.
+ * Uses the drive.file scope (access only to files this app creates). See the
+ * README for the Google Cloud OAuth setup required to enable sync.
  */
-class DriveSync(private val context: Context, private val repo: NotebookRepository) {
+class DriveSync(private val context: Context, private val repo: DocumentRepository) {
 
     private val http = OkHttpClient()
 
@@ -53,42 +53,45 @@ class DriveSync(private val context: Context, private val repo: NotebookReposito
     fun isSignedIn(): Boolean = currentAccount() != null
 
     suspend fun sync(): SyncResult = withContext(Dispatchers.IO) {
-        val account = currentAccount()
-            ?: return@withContext SyncResult(error = "Not signed in")
-        val androidAccount = account.account
-            ?: return@withContext SyncResult(error = "No Google account")
+        val account = currentAccount() ?: return@withContext SyncResult(error = "Not signed in")
+        val androidAccount = account.account ?: return@withContext SyncResult(error = "No Google account")
 
         try {
             val token = GoogleAuthUtil.getToken(context, androidAccount, "oauth2:$DRIVE_FILE_SCOPE")
-            val folderId = ensureFolder(token)
-            val remote = listRemote(folderId, token).associateBy { it.notebookId }
+            val rootId = ensureRootFolder(token)
+            val remote = listRemoteDocs(rootId, token).associateBy { it.docId }
 
             var uploaded = 0
             var downloaded = 0
 
-            val localSummaries = repo.list()
-            val localIds = localSummaries.map { it.id }.toSet()
+            val locals = repo.list()
+            val localIds = locals.map { it.id }.toSet()
 
-            for (summary in localSummaries) {
-                val local = repo.load(summary.id) ?: continue
-                val match = remote[local.id]
+            for (doc in locals) {
+                val match = remote[doc.id]
                 when {
                     match == null -> {
-                        createRemote(folderId, local, token); uploaded++
+                        val folderId = createFolder(rootId, doc.title, doc.id, doc.updatedAt, token)
+                        pushFiles(doc.id, folderId, token)
+                        uploaded++
                     }
-                    local.updatedAt > match.updatedAt -> {
-                        updateRemote(match.fileId, local, token); uploaded++
+                    doc.updatedAt > match.updatedAt -> {
+                        pushFiles(doc.id, match.folderId, token)
+                        updateFolderMeta(match.folderId, doc.title, doc.updatedAt, token)
+                        uploaded++
                     }
-                    match.updatedAt > local.updatedAt -> {
-                        downloadInto(match.fileId, token)?.let { repo.writeRaw(it); downloaded++ }
+                    match.updatedAt > doc.updatedAt -> {
+                        pullFiles(doc.id, match.folderId, token)
+                        downloaded++
                     }
                 }
             }
 
-            // Notebooks that only exist remotely get pulled down.
+            // Documents that only exist remotely get pulled down.
             for ((id, file) in remote) {
                 if (id !in localIds) {
-                    downloadInto(file.fileId, token)?.let { repo.writeRaw(it); downloaded++ }
+                    pullFiles(id, file.folderId, token)
+                    downloaded++
                 }
             }
 
@@ -98,98 +101,140 @@ class DriveSync(private val context: Context, private val repo: NotebookReposito
         }
     }
 
-    // ---- Drive REST helpers ------------------------------------------------
+    // ---- Drive model helpers ----------------------------------------------
 
-    private data class RemoteFile(val fileId: String, val notebookId: String, val updatedAt: Long)
+    private data class RemoteDoc(val folderId: String, val docId: String, val updatedAt: Long)
 
-    private fun ensureFolder(token: String): String {
-        val q = "mimeType='application/vnd.google-apps.folder' and name='$FOLDER_NAME' and trashed=false"
-        val url = "$DRIVE_API/files?q=${enc(q)}&fields=files(id)&spaces=drive"
-        val body = get(url, token)
-        val files = JSONObject(body).optJSONArray("files")
-        if (files != null && files.length() > 0) {
-            return files.getJSONObject(0).getString("id")
-        }
-        val meta = JSONObject()
-            .put("name", FOLDER_NAME)
-            .put("mimeType", "application/vnd.google-apps.folder")
-        val created = post(
-            "$DRIVE_API/files?fields=id",
-            token,
-            meta.toString().toRequestBody(JSON_MEDIA),
-        )
+    private fun ensureRootFolder(token: String): String {
+        val q = "mimeType='$FOLDER_MIME' and name='$ROOT_NAME' and trashed=false"
+        val body = get("$DRIVE_API/files?q=${enc(q)}&fields=files(id)&spaces=drive", token)
+        JSONObject(body).optJSONArray("files")?.let { if (it.length() > 0) return it.getJSONObject(0).getString("id") }
+        val meta = JSONObject().put("name", ROOT_NAME).put("mimeType", FOLDER_MIME)
+        val created = post("$DRIVE_API/files?fields=id", token, meta.toString().toRequestBody(JSON_MEDIA))
         return JSONObject(created).getString("id")
     }
 
-    private fun listRemote(folderId: String, token: String): List<RemoteFile> {
-        val q = "'$folderId' in parents and trashed=false"
-        val url = "$DRIVE_API/files?q=${enc(q)}&fields=files(id,appProperties)&spaces=drive"
-        val body = get(url, token)
+    private fun listRemoteDocs(rootId: String, token: String): List<RemoteDoc> {
+        val q = "'$rootId' in parents and mimeType='$FOLDER_MIME' and trashed=false"
+        val body = get("$DRIVE_API/files?q=${enc(q)}&fields=files(id,appProperties)&spaces=drive", token)
         val arr = JSONObject(body).optJSONArray("files") ?: return emptyList()
-        val out = mutableListOf<RemoteFile>()
+        val out = mutableListOf<RemoteDoc>()
         for (i in 0 until arr.length()) {
             val f = arr.getJSONObject(i)
             val props = f.optJSONObject("appProperties") ?: continue
-            val nbId = props.optString("notebookId")
-            if (nbId.isEmpty()) continue
+            val docId = props.optString("documentId")
+            if (docId.isEmpty()) continue
             val updated = props.optString("updatedAt").toLongOrNull() ?: 0L
-            out.add(RemoteFile(f.getString("id"), nbId, updated))
+            out.add(RemoteDoc(f.getString("id"), docId, updated))
         }
         return out
     }
 
-    private fun metadataJson(notebook: Notebook, includeParents: String?): JSONObject {
-        val props = JSONObject()
-            .put("notebookId", notebook.id)
-            .put("updatedAt", notebook.updatedAt.toString())
+    private fun createFolder(parentId: String, title: String, docId: String, updatedAt: Long, token: String): String {
         val meta = JSONObject()
-            .put("name", "${notebook.title}.pennote")
-            .put("appProperties", props)
-        if (includeParents != null) {
-            meta.put("parents", org.json.JSONArray().put(includeParents))
+            .put("name", title)
+            .put("mimeType", FOLDER_MIME)
+            .put("parents", JSONArray().put(parentId))
+            .put("appProperties", JSONObject().put("documentId", docId).put("updatedAt", updatedAt.toString()))
+        val created = post("$DRIVE_API/files?fields=id", token, meta.toString().toRequestBody(JSON_MEDIA))
+        return JSONObject(created).getString("id")
+    }
+
+    private fun updateFolderMeta(folderId: String, title: String, updatedAt: Long, token: String) {
+        val meta = JSONObject()
+            .put("name", title)
+            .put("appProperties", JSONObject().put("updatedAt", updatedAt.toString()))
+        patch("$DRIVE_API/files/$folderId?fields=id", token, meta.toString().toRequestBody(JSON_MEDIA))
+    }
+
+    private fun listFilesInFolder(folderId: String, token: String): Map<String, String> {
+        val q = "'$folderId' in parents and mimeType!='$FOLDER_MIME' and trashed=false"
+        val body = get("$DRIVE_API/files?q=${enc(q)}&fields=files(id,name)&spaces=drive", token)
+        val arr = JSONObject(body).optJSONArray("files") ?: return emptyMap()
+        val out = HashMap<String, String>()
+        for (i in 0 until arr.length()) {
+            val f = arr.getJSONObject(i)
+            out[f.getString("name")] = f.getString("id")
         }
-        return meta
+        return out
     }
 
-    private fun createRemote(folderId: String, notebook: Notebook, token: String) {
-        val meta = metadataJson(notebook, includeParents = folderId)
-        multipartUpload("$UPLOAD_API/files?uploadType=multipart&fields=id", "POST", token, meta, notebook)
+    private fun pushFiles(docId: String, folderId: String, token: String) {
+        val remoteFiles = listFilesInFolder(folderId, token)
+        val localFiles = repo.filesFor(docId)
+        val localNames = localFiles.map { it.name }.toSet()
+
+        for (file in localFiles) {
+            val mime = mimeFor(file.name)
+            val existing = remoteFiles[file.name]
+            if (existing != null) {
+                uploadMedia("$UPLOAD_API/files/$existing?uploadType=media&fields=id", "PATCH", token, file.readText(), mime)
+            } else {
+                createFileInFolder(folderId, file.name, file.readText(), mime, token)
+            }
+        }
+        // Remove remote files for pages deleted locally.
+        for ((name, id) in remoteFiles) {
+            if (name !in localNames) delete("$DRIVE_API/files/$id", token)
+        }
     }
 
-    private fun updateRemote(fileId: String, notebook: Notebook, token: String) {
-        val meta = metadataJson(notebook, includeParents = null)
-        multipartUpload("$UPLOAD_API/files/$fileId?uploadType=multipart&fields=id", "PATCH", token, meta, notebook)
+    private fun pullFiles(docId: String, folderId: String, token: String) {
+        val remoteFiles = listFilesInFolder(folderId, token)
+        for ((name, id) in remoteFiles) {
+            val content = get("$DRIVE_API/files/$id?alt=media", token)
+            repo.writeFile(docId, name, content)
+        }
+        // Remove local files no longer present remotely.
+        val remoteNames = remoteFiles.keys
+        repo.filesFor(docId).forEach { if (it.name !in remoteNames) it.delete() }
     }
 
-    private fun multipartUpload(
-        url: String,
-        method: String,
-        token: String,
-        meta: JSONObject,
-        notebook: Notebook,
-    ) {
+    private fun createFileInFolder(folderId: String, name: String, content: String, mime: String, token: String) {
+        val meta = JSONObject().put("name", name).put("parents", JSONArray().put(folderId))
         val body = MultipartBody.Builder()
             .setType("multipart/related".toMediaType())
             .addPart(meta.toString().toRequestBody(JSON_MEDIA))
-            .addPart(repo.encode(notebook).toRequestBody(JSON_MEDIA))
+            .addPart(content.toRequestBody(mime.toMediaType()))
             .build()
         val request = Request.Builder()
-            .url(url)
+            .url("$UPLOAD_API/files?uploadType=multipart&fields=id")
             .header("Authorization", "Bearer $token")
-            .method(method, body)
+            .post(body)
             .build()
         http.newCall(request).execute().use { resp ->
             if (!resp.isSuccessful) error("Drive upload failed: ${resp.code}")
         }
     }
 
-    private fun downloadInto(fileId: String, token: String): Notebook? {
-        val body = get("$DRIVE_API/files/$fileId?alt=media", token)
-        return runCatching { repo.decode(body) }.getOrNull()
+    // ---- Low-level HTTP ----------------------------------------------------
+
+    private fun uploadMedia(url: String, method: String, token: String, content: String, mime: String) {
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $token")
+            .method(method, content.toRequestBody(mime.toMediaType()))
+            .build()
+        http.newCall(request).execute().use { resp ->
+            if (!resp.isSuccessful) error("Drive upload failed: ${resp.code}")
+        }
     }
 
-    private fun get(url: String, token: String): String {
-        val request = Request.Builder().url(url).header("Authorization", "Bearer $token").get().build()
+    private fun get(url: String, token: String): String =
+        exec(Request.Builder().url(url).header("Authorization", "Bearer $token").get().build())
+
+    private fun post(url: String, token: String, body: okhttp3.RequestBody): String =
+        exec(Request.Builder().url(url).header("Authorization", "Bearer $token").post(body).build())
+
+    private fun patch(url: String, token: String, body: okhttp3.RequestBody): String =
+        exec(Request.Builder().url(url).header("Authorization", "Bearer $token").patch(body).build())
+
+    private fun delete(url: String, token: String) {
+        http.newCall(Request.Builder().url(url).header("Authorization", "Bearer $token").delete().build())
+            .execute().use { /* best-effort */ }
+    }
+
+    private fun exec(request: Request): String {
         http.newCall(request).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) error("Drive request failed: ${resp.code}")
@@ -197,13 +242,11 @@ class DriveSync(private val context: Context, private val repo: NotebookReposito
         }
     }
 
-    private fun post(url: String, token: String, body: okhttp3.RequestBody): String {
-        val request = Request.Builder().url(url).header("Authorization", "Bearer $token").post(body).build()
-        http.newCall(request).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) error("Drive request failed: ${resp.code}")
-            return text
-        }
+    private fun mimeFor(name: String): String = when {
+        name.endsWith(".svg") -> "image/svg+xml"
+        name.endsWith(".pennotes") || name.endsWith(".json") -> "application/json"
+        name.endsWith(".md") -> "text/markdown"
+        else -> "text/plain"
     }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
@@ -212,7 +255,8 @@ class DriveSync(private val context: Context, private val repo: NotebookReposito
         private const val DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
         private const val DRIVE_API = "https://www.googleapis.com/drive/v3"
         private const val UPLOAD_API = "https://www.googleapis.com/upload/drive/v3"
-        private const val FOLDER_NAME = "PenNotes"
+        private const val ROOT_NAME = "PenNotes"
+        private const val FOLDER_MIME = "application/vnd.google-apps.folder"
         private val JSON_MEDIA = "application/json; charset=UTF-8".toMediaType()
     }
 }

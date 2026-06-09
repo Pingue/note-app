@@ -40,7 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import app.pennotes.storage.NotebookSummary
+import app.pennotes.storage.DocumentSummary
 import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
@@ -142,7 +142,7 @@ fun NotebookListScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NotebookCard(
-    summary: NotebookSummary,
+    summary: DocumentSummary,
     onOpen: () -> Unit,
     onDelete: () -> Unit,
 ) {
