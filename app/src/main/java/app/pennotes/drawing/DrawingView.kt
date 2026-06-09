@@ -10,6 +10,8 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import app.pennotes.model.Notebook
 import app.pennotes.model.Page
+import app.pennotes.model.PageOrientation
+import app.pennotes.model.PageType
 import app.pennotes.model.Stroke
 import app.pennotes.model.StrokePoint
 import app.pennotes.model.ToolType
@@ -50,6 +52,9 @@ class DrawingView(context: Context) : View(context) {
     /** Invoked when pages are added/removed/reoriented, so the host can refresh. */
     var onStructureChanged: (() -> Unit)? = null
 
+    /** Invoked when a Markdown page is tapped, so the host can open the editor. */
+    var onMarkdownTap: ((Page) -> Unit)? = null
+
     // Content transform: screen = content * scale + pan.
     private var scale = 1f
     private var panX = 0f
@@ -70,6 +75,12 @@ class DrawingView(context: Context) : View(context) {
     private var fingerPanning = false
     private var lastPanPointerX = 0f
     private var lastPanPointerY = 0f
+
+    // Tap-to-edit state for Markdown pages.
+    private var mdTapping = false
+    private var mdDownX = 0f
+    private var mdDownY = 0f
+    private val tapSlop = 12f * resources.displayMetrics.density
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -113,6 +124,7 @@ class DrawingView(context: Context) : View(context) {
         notebook = nb
         undoStack.clear()
         redoStack.clear()
+        MarkdownRenderer.clearCache()
         recomputeLayout()
         post {
             fitToWidth()
@@ -169,12 +181,21 @@ class DrawingView(context: Context) : View(context) {
         } ?: 0
     }
 
-    fun addPage(orientation: app.pennotes.model.PageOrientation) {
-        notebook.pages.add(Page(orientation = orientation))
+    fun addPage(orientation: PageOrientation, type: PageType = PageType.SVG): Page {
+        val page = Page(orientation = orientation, type = type)
+        notebook.pages.add(page)
         recomputeLayout()
         onChanged?.invoke()
         onStructureChanged?.invoke()
         post { scrollToPage(notebook.pages.lastIndex) }
+        invalidate()
+        return page
+    }
+
+    /** Re-render after a Markdown page's text was edited elsewhere. */
+    fun refreshMarkdown() {
+        MarkdownRenderer.clearCache()
+        onChanged?.invoke()
         invalidate()
     }
 
@@ -313,7 +334,12 @@ class DrawingView(context: Context) : View(context) {
                 redoStack.clear()
                 val pl = placedAt(cy) ?: return true
                 activePage = pl
-                if (objectErase) {
+                if (pl.page.type == PageType.MARKDOWN) {
+                    // Markdown pages aren't drawn on; a tap opens the text editor.
+                    mdTapping = true
+                    mdDownX = event.x
+                    mdDownY = event.y
+                } else if (objectErase) {
                     erasedThisGesture.clear()
                     eraseAt(pl, cx, cy)
                 } else {
@@ -326,7 +352,11 @@ class DrawingView(context: Context) : View(context) {
 
             MotionEvent.ACTION_MOVE -> {
                 val pl = activePage ?: return true
-                if (objectErase) {
+                if (pl.page.type == PageType.MARKDOWN) {
+                    if (mdTapping && (abs(event.x - mdDownX) > tapSlop || abs(event.y - mdDownY) > tapSlop)) {
+                        mdTapping = false
+                    }
+                } else if (objectErase) {
                     eraseAt(pl, cx, cy)
                 } else {
                     currentStroke?.points?.add(localPoint(pl, cx, cy, pressure))
@@ -336,7 +366,12 @@ class DrawingView(context: Context) : View(context) {
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 val pl = activePage
-                if (objectErase) {
+                if (pl != null && pl.page.type == PageType.MARKDOWN) {
+                    if (mdTapping && event.actionMasked == MotionEvent.ACTION_UP) {
+                        onMarkdownTap?.invoke(pl.page)
+                    }
+                    mdTapping = false
+                } else if (objectErase) {
                     if (pl != null && erasedThisGesture.isNotEmpty()) {
                         undoStack.addLast(EraseOp(pl.page, erasedThisGesture.toList()))
                         erasedThisGesture.clear()
@@ -434,9 +469,13 @@ class DrawingView(context: Context) : View(context) {
             canvas.translate(pl.xOffset, pl.topY)
             canvas.clipRect(0f, 0f, pl.page.width, pl.page.height)
             canvas.drawRect(0f, 0f, pl.page.width, pl.page.height, pagePaint)
-            for (stroke in pl.page.strokes) StrokeRenderer.draw(canvas, stroke, paint, tmpPath)
-            if (active != null && pl.page === active.page) {
-                currentStroke?.let { StrokeRenderer.draw(canvas, it, paint, tmpPath) }
+            if (pl.page.type == PageType.MARKDOWN) {
+                MarkdownRenderer.draw(canvas, pl.page)
+            } else {
+                for (stroke in pl.page.strokes) StrokeRenderer.draw(canvas, stroke, paint, tmpPath)
+                if (active != null && pl.page === active.page) {
+                    currentStroke?.let { StrokeRenderer.draw(canvas, it, paint, tmpPath) }
+                }
             }
             canvas.restore()
             // Border drawn outside the clip so it isn't clipped to half-width.

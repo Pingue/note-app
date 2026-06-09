@@ -71,12 +71,21 @@ class DocumentRepository(context: Context) {
         val folder = folderFor(id)
         val pages = manifest.pages.map { ref ->
             val pf = File(folder, ref.file)
-            val strokes = if (ref.type == PageType.SVG && pf.exists()) {
-                SvgPage.parseStrokes(pf.readText())
-            } else {
-                mutableListOf()
+            val exists = pf.exists()
+            when (ref.type) {
+                PageType.MARKDOWN -> Page(
+                    id = ref.id,
+                    orientation = ref.orientation,
+                    type = PageType.MARKDOWN,
+                    markdown = if (exists) pf.readText() else "",
+                )
+                PageType.SVG -> Page(
+                    id = ref.id,
+                    orientation = ref.orientation,
+                    strokes = if (exists) SvgPage.parseStrokes(pf.readText()) else mutableListOf(),
+                    type = PageType.SVG,
+                )
             }
-            Page(id = ref.id, orientation = ref.orientation, strokes = strokes, type = ref.type)
         }.toMutableList()
 
         Notebook(
@@ -92,9 +101,18 @@ class DocumentRepository(context: Context) {
         val folder = folderFor(notebook.id).apply { mkdirs() }
 
         val refs = notebook.pages.map { page ->
-            val file = "${page.id}.svg"
-            File(folder, file).writeText(SvgPage.toSvg(page))
-            PageRef(id = page.id, type = PageType.SVG, file = file, orientation = page.orientation)
+            when (page.type) {
+                PageType.MARKDOWN -> {
+                    val file = "${page.id}.md"
+                    File(folder, file).writeText(page.markdown)
+                    PageRef(id = page.id, type = PageType.MARKDOWN, file = file, orientation = page.orientation)
+                }
+                PageType.SVG -> {
+                    val file = "${page.id}.svg"
+                    File(folder, file).writeText(SvgPage.toSvg(page))
+                    PageRef(id = page.id, type = PageType.SVG, file = file, orientation = page.orientation)
+                }
+            }
         }.toMutableList()
 
         val manifest = DocumentManifest(

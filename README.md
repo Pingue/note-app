@@ -22,12 +22,17 @@ published to the Play Store.
 - **Pen mode** toggle — when on, only a stylus draws and a single finger
   scrolls; when off, touch draws and two fingers scroll/zoom.
 - **Documents & pages** — create, open, rename and delete documents. Each
-  document is a folder of pages (one SVG per page) described by an
-  `index.pennotes` manifest; pages are independently **portrait or landscape**.
-  Page SVGs are openable in any SVG viewer and round-trip losslessly in-app.
+  document is a folder of pages described by an `index.pennotes` manifest;
+  pages are independently **portrait or landscape**.
+- **Mixed page types** — graphical (handwriting) pages saved as self-describing
+  SVG, and **Markdown text pages** (`.md`), rendered inline in the same
+  continuous scroll. Tap a Markdown page to edit it (`#` headings, `**bold**`,
+  `*italic*`, `- bullets`, `` `code` ``).
 - **Undo / redo** for strokes and erases.
 - **Google Drive sync** — two-way sync to a `PenNotes` folder in your Drive,
-  backed by a local cache so the app works fully offline. Conflicts resolve
+  backed by a local cache so the app works fully offline. Syncs automatically
+  every few minutes while signed in (and on document close), plus on demand.
+  Conflicts resolve
   last-write-wins by modification time.
 - **Export** — save a notebook **PDF** to a chosen location via the system file
   picker, or share it; export each page as a **JPG**.

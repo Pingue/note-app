@@ -9,9 +9,11 @@ import android.graphics.Path
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import androidx.core.content.FileProvider
+import app.pennotes.drawing.MarkdownRenderer
 import app.pennotes.drawing.StrokeRenderer
 import app.pennotes.model.Notebook
 import app.pennotes.model.Page
+import app.pennotes.model.PageType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -40,8 +42,17 @@ object Exporter {
             strokeJoin = Paint.Join.ROUND
         }
         val path = Path()
-        for (stroke in page.strokes) StrokeRenderer.draw(canvas, stroke, paint, path)
+        drawPageContent(canvas, page, paint, path)
         return bmp
+    }
+
+    /** Renders a page's content (strokes or Markdown) onto an already-white canvas. */
+    private fun drawPageContent(canvas: Canvas, page: Page, paint: Paint, path: Path) {
+        if (page.type == PageType.MARKDOWN) {
+            MarkdownRenderer.draw(canvas, page)
+        } else {
+            for (stroke in page.strokes) StrokeRenderer.draw(canvas, stroke, paint, path)
+        }
     }
 
     suspend fun exportPdf(context: Context, notebook: Notebook): File = withContext(Dispatchers.IO) {
@@ -59,7 +70,7 @@ object Exporter {
                 }
                 val path = Path()
                 pdfPage.canvas.drawColor(Color.WHITE)
-                for (stroke in page.strokes) StrokeRenderer.draw(pdfPage.canvas, stroke, paint, path)
+                drawPageContent(pdfPage.canvas, page, paint, path)
                 doc.finishPage(pdfPage)
             }
             val out = File(exportsDir(context), "${sanitize(notebook.title)}.pdf")

@@ -14,6 +14,8 @@ import app.pennotes.storage.DocumentSummary
 import app.pennotes.sync.DriveSync
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /** Drives the whole app: the notebook list, the open notebook, and Drive sync. */
@@ -36,6 +38,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     init {
         refresh()
         refreshAccount()
+        startAutoSync()
+    }
+
+    /** Periodically syncs in the background while signed in (silent unless something changes). */
+    private fun startAutoSync() {
+        viewModelScope.launch {
+            while (isActive) {
+                delay(AUTO_SYNC_MS)
+                if (driveSync.isSignedIn()) sync(silent = true)
+            }
+        }
     }
 
     fun refresh() = viewModelScope.launch {
@@ -60,6 +73,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         current?.let { repo.save(it) }
         current = null
         notebooks = repo.list()
+        if (driveSync.isSignedIn()) sync(silent = true)
     }
 
     fun saveCurrent() = viewModelScope.launch {
@@ -104,21 +118,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         else -> "Drive sign-in failed (error $code)."
     }
 
-    fun sync() {
+    fun sync(silent: Boolean = false) {
         if (syncing) return
         viewModelScope.launch {
             syncing = true
-            statusMessage = "Syncing…"
+            if (!silent) statusMessage = "Syncing…"
             val result = driveSync.sync()
             syncing = false
-            statusMessage = when {
-                result.error != null -> "Sync failed: ${result.error}"
-                else -> "Synced ↑${result.uploaded} ↓${result.downloaded}" +
-                    if (result.deleted > 0) " ✕${result.deleted}" else ""
+            val changed = (result.uploaded + result.downloaded + result.deleted) > 0
+            when {
+                result.error != null -> if (!silent) statusMessage = "Sync failed: ${result.error}"
+                !silent || changed -> statusMessage =
+                    "Synced ↑${result.uploaded} ↓${result.downloaded}" +
+                        if (result.deleted > 0) " ✕${result.deleted}" else ""
+                // Silent pass with no changes: stay quiet.
             }
-            // A pulled notebook may have replaced the open one on disk; refresh list.
+            // Refresh the list; the open document keeps its in-memory state and is
+            // not reloaded here, so active edits are never clobbered mid-session.
             notebooks = repo.list()
-            current?.let { open(it.id) }
         }
+    }
+
+    companion object {
+        private const val AUTO_SYNC_MS = 5 * 60 * 1000L
     }
 }

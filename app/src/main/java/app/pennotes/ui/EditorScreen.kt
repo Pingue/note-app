@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -42,6 +43,8 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -62,7 +65,9 @@ import app.pennotes.drawing.DrawingView
 import app.pennotes.drawing.EraserMode
 import app.pennotes.drawing.ToolSettings
 import app.pennotes.export.Exporter
+import app.pennotes.model.Page
 import app.pennotes.model.PageOrientation
+import app.pennotes.model.PageType
 import app.pennotes.model.ToolType
 import kotlinx.coroutines.launch
 
@@ -83,6 +88,13 @@ fun EditorScreen(vm: AppViewModel) {
     var drawingView by remember { mutableStateOf<DrawingView?>(null) }
     var pageCount by remember(notebook.id) { mutableStateOf(notebook.pages.size) }
     var showRename by remember { mutableStateOf(false) }
+    var editingPage by remember { mutableStateOf<Page?>(null) }
+    var editingText by remember { mutableStateOf("") }
+
+    fun openMarkdown(page: Page) {
+        editingText = page.markdown
+        editingPage = page
+    }
 
     LaunchedEffect(vm.statusMessage) {
         vm.statusMessage?.let {
@@ -132,6 +144,7 @@ fun EditorScreen(vm: AppViewModel) {
                 DrawingView(ctx).also { view ->
                     view.onChanged = { vm.saveCurrent() }
                     view.onStructureChanged = { pageCount = view.pageCount() }
+                    view.onMarkdownTap = { page -> openMarkdown(page) }
                     drawingView = view
                 }
             },
@@ -157,6 +170,9 @@ fun EditorScreen(vm: AppViewModel) {
             onUndo = { drawingView?.undo() },
             onRedo = { drawingView?.redo() },
             onAddPage = { drawingView?.addPage(it) },
+            onAddMarkdownPage = {
+                drawingView?.addPage(PageOrientation.PORTRAIT, PageType.MARKDOWN)?.let { openMarkdown(it) }
+            },
             onSharePdf = { share("application/pdf") { listOf(Exporter.exportPdf(context, notebook)) } },
             onSavePdf = { savePdf.launch("${notebook.title}.pdf") },
             onExportJpg = { share("image/jpeg") { Exporter.exportJpgs(context, notebook) } },
@@ -191,6 +207,52 @@ fun EditorScreen(vm: AppViewModel) {
             onDismiss = { showRename = false },
         )
     }
+
+    editingPage?.let { page ->
+        MarkdownEditorOverlay(
+            text = editingText,
+            onTextChange = { editingText = it },
+            onCancel = { editingPage = null },
+            onDone = {
+                page.markdown = editingText
+                drawingView?.refreshMarkdown()
+                vm.saveCurrent()
+                editingPage = null
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MarkdownEditorOverlay(
+    text: String,
+    onTextChange: (String) -> Unit,
+    onCancel: () -> Unit,
+    onDone: () -> Unit,
+) {
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onCancel) { Text("Cancel") }
+                Text(
+                    "Edit text",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f).padding(start = 8.dp),
+                )
+                TextButton(onClick = onDone) { Text("Done") }
+            }
+            TextField(
+                value = text,
+                onValueChange = onTextChange,
+                modifier = Modifier.fillMaxSize().padding(8.dp),
+                placeholder = { Text("Write Markdown… # heading, **bold**, - bullet") },
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -205,6 +267,7 @@ private fun EditorTopBar(
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onAddPage: (PageOrientation) -> Unit,
+    onAddMarkdownPage: () -> Unit,
     onSharePdf: () -> Unit,
     onSavePdf: () -> Unit,
     onExportJpg: () -> Unit,
@@ -260,6 +323,9 @@ private fun EditorTopBar(
                 })
                 DropdownMenuItem(text = { Text("Add landscape page") }, onClick = {
                     addMenu = false; onAddPage(PageOrientation.LANDSCAPE)
+                })
+                DropdownMenuItem(text = { Text("Add text (Markdown) page") }, onClick = {
+                    addMenu = false; onAddMarkdownPage()
                 })
             }
             IconButton(onClick = onSync, enabled = !syncing) {

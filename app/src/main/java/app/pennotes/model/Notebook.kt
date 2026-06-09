@@ -49,6 +49,8 @@ data class Page(
     var orientation: PageOrientation = PageOrientation.PORTRAIT,
     val strokes: MutableList<Stroke> = mutableListOf(),
     var type: PageType = PageType.SVG,
+    /** Source text for [PageType.MARKDOWN] pages; unused for SVG pages. */
+    var markdown: String = "",
 ) {
     val width: Float get() = if (orientation == PageOrientation.PORTRAIT) A4_SHORT else A4_LONG
     val height: Float get() = if (orientation == PageOrientation.PORTRAIT) A4_LONG else A4_SHORT
