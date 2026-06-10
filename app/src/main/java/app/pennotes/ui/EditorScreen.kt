@@ -3,16 +3,23 @@ package app.pennotes.ui
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -31,6 +38,7 @@ import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -55,11 +63,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.min
+import kotlin.math.sin
 import androidx.compose.ui.viewinterop.AndroidView
 import app.pennotes.drawing.DrawingView
 import app.pennotes.drawing.EraserMode
@@ -75,6 +94,11 @@ import kotlinx.coroutines.launch
 private val PRESET_COLORS = listOf(
     Color(0xFF000000), Color(0xFF455A64), Color(0xFFD32F2F), Color(0xFFF57C00),
     Color(0xFFFBC02D), Color(0xFF388E3C), Color(0xFF1976D2), Color(0xFF7B1FA2),
+)
+
+// Hue ring for the colour wheel: 0..360° at red, yellow, green, cyan, blue, magenta, red.
+private val HUE_COLORS = listOf(
+    Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue, Color.Magenta, Color.Red,
 )
 
 @Composable
@@ -349,12 +373,20 @@ private fun EditorTopBar(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ToolPanel(
     settings: ToolSettings,
     onSettingsChange: (ToolSettings) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // When set, shows the colour-wheel picker seeded with this ARGB value.
+    var pickerSeed by remember { mutableStateOf<Int?>(null) }
+
+    fun applyColor(argb: Int) = onSettingsChange(
+        if (settings.tool == ToolType.PEN) settings.copy(penColor = argb)
+        else settings.copy(highlighterColor = argb)
+    )
     Surface(
         modifier = modifier.padding(12.dp),
         shape = RoundedCornerShape(20.dp),
@@ -390,13 +422,31 @@ private fun ToolPanel(
                                     color = if (argb == selected) MaterialTheme.colorScheme.primary else Color.Gray,
                                     shape = CircleShape,
                                 )
-                                .clickable {
-                                    onSettingsChange(
-                                        if (settings.tool == ToolType.PEN) settings.copy(penColor = argb)
-                                        else settings.copy(highlighterColor = argb)
-                                    )
-                                },
+                                .combinedClickable(
+                                    onClick = { applyColor(argb) },
+                                    onLongClick = { pickerSeed = argb },
+                                ),
                         ) {}
+                    }
+                    // Custom colour: long-press any swatch, or tap this to open the wheel.
+                    val custom = selected !in PRESET_COLORS.map { it.toArgb() }
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).background(Color(selected))
+                            .border(
+                                width = if (custom) 3.dp else 1.dp,
+                                color = if (custom) MaterialTheme.colorScheme.primary else Color.Gray,
+                                shape = CircleShape,
+                            )
+                            .combinedClickable(
+                                onClick = { pickerSeed = selected },
+                                onLongClick = { pickerSeed = selected },
+                            ),
+                    ) {
+                        Text(
+                            "+",
+                            color = if (custom) Color.White else Color.Gray,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
                     }
                 }
             } else {
@@ -438,6 +488,98 @@ private fun ToolPanel(
             }
         }
     }
+
+    pickerSeed?.let { seed ->
+        ColorWheelDialog(
+            initial = seed,
+            onDismiss = { pickerSeed = null },
+            onConfirm = { picked -> applyColor(picked); pickerSeed = null },
+        )
+    }
+}
+
+/** Full HSV colour picker: a hue/saturation wheel plus a brightness slider. */
+@Composable
+private fun ColorWheelDialog(
+    initial: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit,
+) {
+    val start = remember { FloatArray(3).also { android.graphics.Color.colorToHSV(initial, it) } }
+    var hue by remember { mutableStateOf(start[0]) }
+    var sat by remember { mutableStateOf(start[1]) }
+    var value by remember { mutableStateOf(start[2]) }
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    val current = android.graphics.Color.HSVToColor(floatArrayOf(hue, sat, value))
+
+    fun updateFrom(pos: Offset) {
+        val cx = boxSize.width / 2f
+        val cy = boxSize.height / 2f
+        if (cx <= 0f) return
+        val dx = pos.x - cx
+        val dy = pos.y - cy
+        val radius = min(cx, cy)
+        sat = (hypot(dx, dy) / radius).coerceIn(0f, 1f)
+        var h = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+        if (h < 0f) h += 360f
+        hue = h
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = { onConfirm(current or (0xFF shl 24)) }) { Text("Select") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        title = { Text("Pick colour") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    Modifier
+                        .size(220.dp)
+                        .onSizeChanged { boxSize = it }
+                        .pointerInput(Unit) { detectTapGestures { updateFrom(it) } }
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, _ -> updateFrom(change.position); change.consume() }
+                        },
+                ) {
+                    Canvas(Modifier.fillMaxSize()) {
+                        val r = size.minDimension / 2f
+                        val center = Offset(size.width / 2f, size.height / 2f)
+                        drawCircle(Brush.sweepGradient(HUE_COLORS, center), r, center)
+                        drawCircle(
+                            Brush.radialGradient(listOf(Color.White, Color.Transparent), center, r),
+                            r, center,
+                        )
+                        if (value < 1f) drawCircle(Color.Black.copy(alpha = 1f - value), r, center)
+                        // Selection ring (white over black for contrast on any hue).
+                        val ang = Math.toRadians(hue.toDouble())
+                        val rr = sat * r
+                        val sel = Offset(
+                            center.x + (rr * cos(ang)).toFloat(),
+                            center.y + (rr * sin(ang)).toFloat(),
+                        )
+                        drawCircle(Color.Black, 8.dp.toPx(), sel, style = Stroke(width = 3.dp.toPx()))
+                        drawCircle(Color.White, 8.dp.toPx(), sel, style = Stroke(width = 1.5.dp.toPx()))
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Brightness", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(86.dp))
+                    Slider(value = value, onValueChange = { value = it }, modifier = Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(current))
+                        .border(1.dp, Color.Gray, RoundedCornerShape(8.dp)),
+                )
+            }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
