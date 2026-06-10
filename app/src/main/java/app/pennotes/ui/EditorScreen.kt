@@ -116,6 +116,7 @@ fun EditorScreen(vm: AppViewModel) {
     var showRename by remember { mutableStateOf(false) }
     var editingPage by remember { mutableStateOf<Page?>(null) }
     var editingText by remember { mutableStateOf("") }
+    var appliedReloadKey by remember { mutableStateOf(vm.reloadKey) }
 
     fun openMarkdown(page: Page) {
         editingText = page.markdown
@@ -175,9 +176,10 @@ fun EditorScreen(vm: AppViewModel) {
                 }
             },
             update = { view ->
-                if (view.tag != notebook.id) {
+                if (view.tag != notebook.id || appliedReloadKey != vm.reloadKey) {
                     view.setNotebook(notebook)
                     view.tag = notebook.id
+                    appliedReloadKey = vm.reloadKey
                     pageCount = notebook.pages.size
                 }
                 view.settings = settings
@@ -231,6 +233,21 @@ fun EditorScreen(vm: AppViewModel) {
             confirmLabel = "Rename",
             onConfirm = { showRename = false; vm.rename(it) },
             onDismiss = { showRename = false },
+        )
+    }
+
+    if (vm.pendingRemoteDoc != null) {
+        AlertDialog(
+            onDismissRequest = { vm.dismissRemoteReload() },
+            title = { Text("Updated on another device") },
+            text = {
+                Text(
+                    "This document was changed elsewhere and synced from Drive. " +
+                        "Reload the latest version? Changes you've made here since will be replaced."
+                )
+            },
+            confirmButton = { TextButton(onClick = { vm.acceptRemoteReload() }) { Text("Reload") } },
+            dismissButton = { TextButton(onClick = { vm.dismissRemoteReload() }) { Text("Keep mine") } },
         )
     }
 

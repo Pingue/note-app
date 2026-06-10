@@ -25,6 +25,8 @@ data class SyncResult(
     val uploaded: Int = 0,
     val downloaded: Int = 0,
     val deleted: Int = 0,
+    /** Document ids whose local copy was updated from Drive this pass. */
+    val downloadedIds: List<String> = emptyList(),
     val error: String? = null,
 )
 
@@ -73,6 +75,7 @@ class DriveSync(private val context: Context, private val repo: DocumentReposito
             var uploaded = 0
             var downloaded = 0
             var deleted = 0
+            val downloadedIds = mutableListOf<String>()
             val survivors = HashMap<String, Long>()
 
             for (id in locals.keys + remote.keys) {
@@ -90,6 +93,7 @@ class DriveSync(private val context: Context, private val repo: DocumentReposito
                             rem.updatedAt > local.updatedAt -> {
                                 pullFiles(id, rem.folderId, token)
                                 downloaded++
+                                downloadedIds.add(id)
                             }
                         }
                         survivors[id] = maxOf(local.updatedAt, rem.updatedAt)
@@ -116,6 +120,7 @@ class DriveSync(private val context: Context, private val repo: DocumentReposito
                         } else {
                             pullFiles(id, rem.folderId, token)
                             downloaded++
+                            downloadedIds.add(id)
                             survivors[id] = rem.updatedAt
                         }
                     }
@@ -123,7 +128,12 @@ class DriveSync(private val context: Context, private val repo: DocumentReposito
             }
 
             writeBaseline(survivors)
-            SyncResult(uploaded = uploaded, downloaded = downloaded, deleted = deleted)
+            SyncResult(
+                uploaded = uploaded,
+                downloaded = downloaded,
+                deleted = deleted,
+                downloadedIds = downloadedIds,
+            )
         } catch (e: Exception) {
             SyncResult(error = e.message ?: e.javaClass.simpleName)
         }

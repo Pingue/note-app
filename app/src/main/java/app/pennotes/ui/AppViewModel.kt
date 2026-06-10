@@ -37,6 +37,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var statusMessage by mutableStateOf<String?>(null)
 
+    /**
+     * The freshly-pulled remote version of the currently open document, when a
+     * sync downloaded an update for it. The editor surfaces a prompt; the local
+     * in-memory copy stays authoritative until the user chooses to reload.
+     */
+    var pendingRemoteDoc by mutableStateOf<Notebook?>(null)
+        private set
+
+    /** Bumped to force the editor to re-bind a reloaded notebook of the same id. */
+    var reloadKey by mutableStateOf(0)
+        private set
+
     init {
         refresh()
         refreshAccount()
@@ -68,11 +80,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun open(id: String) = viewModelScope.launch {
+        pendingRemoteDoc = null
         current = repo.load(id)
     }
 
     fun close() = viewModelScope.launch {
         saveJob?.cancel()
+        pendingRemoteDoc = null
         current?.let { repo.save(it.snapshot()) }
         current = null
         notebooks = repo.list()
@@ -151,7 +165,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             // Refresh the list; the open document keeps its in-memory state and is
             // not reloaded here, so active edits are never clobbered mid-session.
             notebooks = repo.list()
+
+            // If the open document was updated from Drive, stash the fresh copy
+            // and let the editor offer to reload it (rather than silently losing
+            // the remote change to the local cache).
+            val open = current
+            if (open != null && open.id in result.downloadedIds && pendingRemoteDoc?.id != open.id) {
+                pendingRemoteDoc = repo.load(open.id)
+            }
         }
+    }
+
+    /** Apply the pending remote version to the editor, discarding local edits. */
+    fun acceptRemoteReload() {
+        val remote = pendingRemoteDoc ?: return
+        saveJob?.cancel() // don't let a queued save of the old copy overwrite it
+        pendingRemoteDoc = null
+        current = remote
+        reloadKey++
+    }
+
+    /** Keep editing the local copy; it will be saved over the pulled files. */
+    fun dismissRemoteReload() {
+        pendingRemoteDoc = null
+        saveCurrent()
     }
 
     companion object {
