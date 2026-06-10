@@ -69,6 +69,7 @@ import app.pennotes.model.Page
 import app.pennotes.model.PageOrientation
 import app.pennotes.model.PageType
 import app.pennotes.model.ToolType
+import app.pennotes.storage.Prefs
 import kotlinx.coroutines.launch
 
 private val PRESET_COLORS = listOf(
@@ -83,8 +84,9 @@ fun EditorScreen(vm: AppViewModel) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
-    var settings by remember { mutableStateOf(ToolSettings()) }
-    var penMode by remember { mutableStateOf(false) }
+    val prefs = remember { Prefs(context) }
+    var settings by remember { mutableStateOf(prefs.loadSettings()) }
+    var penMode by remember { mutableStateOf(prefs.penMode) }
     var drawingView by remember { mutableStateOf<DrawingView?>(null) }
     var pageCount by remember(notebook.id) { mutableStateOf(notebook.pages.size) }
     var showRename by remember { mutableStateOf(false) }
@@ -164,7 +166,7 @@ fun EditorScreen(vm: AppViewModel) {
             title = notebook.title,
             pageCount = pageCount,
             penMode = penMode,
-            onTogglePenMode = { penMode = !penMode },
+            onTogglePenMode = { penMode = !penMode; prefs.penMode = penMode },
             onBack = { vm.close() },
             onTitleClick = { showRename = true },
             onUndo = { drawingView?.undo() },
@@ -188,7 +190,7 @@ fun EditorScreen(vm: AppViewModel) {
         // Floating tool panel overlaid at the bottom.
         ToolPanel(
             settings = settings,
-            onSettingsChange = { settings = it },
+            onSettingsChange = { settings = it; prefs.saveSettings(it) },
             modifier = Modifier.align(Alignment.BottomCenter),
         )
 

@@ -678,6 +678,10 @@ class DrawingView(context: Context) : View(context) {
 
         val active = activePage
         for (pl in placed) {
+            // Cull pages scrolled fully off-screen so we don't paint their strokes.
+            val screenTop = panY + pl.topY * scale
+            val screenBottom = screenTop + pl.page.height * scale
+            if (screenBottom < 0f || screenTop > height) continue
             canvas.save()
             canvas.translate(pl.xOffset, pl.topY)
             canvas.clipRect(0f, 0f, pl.page.width, pl.page.height)
@@ -708,7 +712,11 @@ class DrawingView(context: Context) : View(context) {
         /** Contacts wider than this are treated as a palm even without hover support. */
         private const val PALM_CONTACT_MM = 22f
 
-        /** Page-unit distance below which consecutive samples are merged (~0.17mm). */
-        private const val MIN_POINT_DISTANCE = 1f
+        /**
+         * Page-unit distance below which consecutive samples are merged (~0.4mm).
+         * Higher = fewer points = faster drawing/redraw, at a small cost in the
+         * fidelity of very tight curves.
+         */
+        private const val MIN_POINT_DISTANCE = 2.5f
     }
 }

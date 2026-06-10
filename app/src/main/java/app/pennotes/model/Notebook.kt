@@ -72,6 +72,19 @@ data class Notebook(
     var updatedAt: Long = System.currentTimeMillis(),
 )
 
+/**
+ * A deep copy safe to hand to a background thread for saving while the live
+ * notebook keeps being edited on the UI thread. [StrokePoint] is immutable so
+ * point references can be shared; the mutable lists are copied.
+ */
+fun Notebook.snapshot(): Notebook = copy(
+    pages = pages.map { page ->
+        page.copy(
+            strokes = page.strokes.map { it.copy(points = it.points.toMutableList()) }.toMutableList(),
+        )
+    }.toMutableList(),
+)
+
 /** One entry in the document manifest, pointing at a page's underlying file. */
 @Serializable
 data class PageRef(

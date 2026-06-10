@@ -39,25 +39,39 @@ object StrokeRenderer {
                     canvas.drawPoint(pts[0].x, pts[0].y, paint)
                     return
                 }
-                // Pressure varies along the stroke, so it's drawn as a chain of
-                // short quadratic spans — midpoint to midpoint with the sample
-                // point as control — each at its own width. Round caps blend
+                // Pressure varies along the stroke, so width does too. Rather than
+                // one drawPath per segment (very expensive), consecutive segments
+                // whose pressure-width quantises to the same value are batched into
+                // a single quadratic path and drawn in one call. Round caps blend
                 // the width steps together.
                 var prevMidX = pts[0].x
                 var prevMidY = pts[0].y
+                var runWidth = -1f
+                var open = false
                 for (i in 1 until pts.size) {
                     val a = pts[i - 1]
                     val b = pts[i]
                     val midX = if (i == pts.size - 1) b.x else (a.x + b.x) / 2f
                     val midY = if (i == pts.size - 1) b.y else (a.y + b.y) / 2f
                     val pressure = (a.pressure + b.pressure) / 2f
-                    paint.strokeWidth = stroke.width * (0.4f + 0.6f * pressure.coerceIn(0f, 1f))
-                    path.reset()
-                    path.moveTo(prevMidX, prevMidY)
+                    val w = quantize(stroke.width * (0.4f + 0.6f * pressure.coerceIn(0f, 1f)))
+                    if (w != runWidth) {
+                        if (open) {
+                            paint.strokeWidth = runWidth
+                            canvas.drawPath(path, paint)
+                        }
+                        path.reset()
+                        path.moveTo(prevMidX, prevMidY)
+                        runWidth = w
+                        open = true
+                    }
                     path.quadTo(a.x, a.y, midX, midY)
-                    canvas.drawPath(path, paint)
                     prevMidX = midX
                     prevMidY = midY
+                }
+                if (open) {
+                    paint.strokeWidth = runWidth
+                    canvas.drawPath(path, paint)
                 }
             }
 
@@ -73,6 +87,11 @@ object StrokeRenderer {
             ToolType.ERASER -> { /* object eraser mutates the stroke list, nothing to draw */ }
         }
     }
+
+    /** Round width to discrete steps so adjacent segments can share one draw call. */
+    private fun quantize(w: Float): Float = (Math.round(w / WIDTH_STEP) * WIDTH_STEP).coerceAtLeast(0.5f)
+
+    private const val WIDTH_STEP = 0.75f
 
     /** One smooth constant-width path: quads through midpoints, line caps at the ends. */
     private fun buildSmoothPath(path: Path, pts: List<StrokePoint>) {

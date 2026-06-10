@@ -9,11 +9,13 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.pennotes.model.Notebook
+import app.pennotes.model.snapshot
 import app.pennotes.storage.DocumentRepository
 import app.pennotes.storage.DocumentSummary
 import app.pennotes.sync.DriveSync
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.common.api.ApiException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -70,14 +72,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun close() = viewModelScope.launch {
-        current?.let { repo.save(it) }
+        saveJob?.cancel()
+        current?.let { repo.save(it.snapshot()) }
         current = null
         notebooks = repo.list()
         if (driveSync.isSignedIn()) sync(silent = true)
     }
 
-    fun saveCurrent() = viewModelScope.launch {
-        current?.let { repo.save(it) }
+    private var saveJob: Job? = null
+
+    /**
+     * Debounced autosave: coalesces rapid edits into one write, and serialises a
+     * deep [snapshot] (taken on the main thread) so the background write never
+     * races the live strokes being drawn.
+     */
+    fun saveCurrent() {
+        val nb = current ?: return
+        saveJob?.cancel()
+        saveJob = viewModelScope.launch {
+            delay(SAVE_DEBOUNCE_MS)
+            repo.save(nb.snapshot())
+        }
     }
 
     fun delete(id: String) = viewModelScope.launch {
@@ -141,5 +156,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val AUTO_SYNC_MS = 5 * 60 * 1000L
+        private const val SAVE_DEBOUNCE_MS = 700L
     }
 }
